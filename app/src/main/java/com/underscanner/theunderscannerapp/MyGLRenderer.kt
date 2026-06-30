@@ -4,6 +4,7 @@ import android.content.Context
 import android.opengl.GLES20
 import android.opengl.GLSurfaceView
 import android.opengl.Matrix
+import android.os.SystemClock
 import android.util.Log
 import java.io.BufferedReader
 import java.io.File
@@ -17,32 +18,31 @@ import javax.microedition.khronos.egl.EGLConfig
 import javax.microedition.khronos.opengles.GL10
 import kotlin.math.*
 
-// Camera mode enum
-enum class CameraMode {
-    ORBIT,
-    FPV
-}
-
+/**
+ * OpenGL ES 2.0 point-cloud renderer. The vertex/parse/draw pipeline is unchanged from
+ * the original viewer; the camera is the new single-state [OrbitCamera] (see that file).
+ *
+ * Touch gestures (in [MyGLSurfaceView]) call the `cam*` / `teleport*` / `frameAll`
+ * methods here via `queueEvent`, so all camera mutation happens on the GL thread — no
+ * locking is needed against the draw loop.
+ */
 class MyGLRenderer(
     private val context: Context,
     private val fileName: String = "scan1.pcd",
     private val liveMode: Boolean = false
 ) : GLSurfaceView.Renderer {
 
-    // Vertex buffer containing the point cloud vertices
+    // Vertex buffer containing the point cloud vertices (file mode)
     private lateinit var vertexBuffer: FloatBuffer
-    // OpenGL shader program ID
     private var program = 0
-    // Total number of points loaded from the PCD file
     private var pointCount: Int = 0
 
     // ----------------------------
     // Live preview (Phase 2)
     // ----------------------------
-    // When set, points are drawn from this accumulating buffer instead of the file buffer.
     @Volatile
     var previewSource: PreviewCloud? = null
-    // Current sensor position (world frame) to draw as a marker, or null.
+
     @Volatile
     private var poseMarker: FloatArray? = null
 
@@ -51,142 +51,111 @@ class MyGLRenderer(
     }
 
     // ----------------------------
-    // Camera Mode
+    // Camera
     // ----------------------------
-    private var _cameraMode: CameraMode = CameraMode.ORBIT
-    val cameraMode: CameraMode
-        get() = _cameraMode
+    val camera = OrbitCamera()
+
+    // Scene bounds for frame-all (file mode computed once at load).
+    private var hasBounds = false
+    private val boundsMin = floatArrayOf(0f, 0f, 0f)
+    private val boundsMax = floatArrayOf(0f, 0f, 0f)
+    private var pendingInitialFit = false
 
     // ----------------------------
-    // Orbit Camera Parameters
+    // Matrices
     // ----------------------------
-
-    // The target point the camera is orbiting around
-    private val orbitTarget = floatArrayOf(0f, 0f, 0f)
-    private var orbitYaw = 0f          // in degrees
-    private var orbitPitch = 20f       // in degrees
-    private var orbitDistance = 20f    // distance from target
-
-    // ----------------------------
-    // FPV Camera Parameters
-    // ----------------------------
-
-    // Camera position in 3D space
-    private val fpvPosition = floatArrayOf(0f, 0f, 20f)
-    private var fpvYaw = 0f       // Looking direction (horizontal)
-    private var fpvPitch = 0f     // Looking direction (vertical)
-    private var fpvRoll = 0f      // Camera roll (for flight sim controls)
-
-    // ----------------------------
-    // Auto-Level Parameters
-    // ----------------------------
-    var autoLevelEnabled = false
-    private var targetOrbitPitch = orbitPitch
-    private val autoLevelLerpSpeed = 0.1f  // Smooth interpolation speed
-
-    // ----------------------------
-    // Matrices for rendering
-    // ----------------------------
-
     private val viewMatrix = FloatArray(16)
     private val projectionMatrix = FloatArray(16)
     private val modelMatrix = FloatArray(16)
-    // Surface dimensions (used for aspect ratio calculation)
     private var surfaceWidth = 1
     private var surfaceHeight = 1
+    private var lastFrameTimeMs = 0L
 
     // ----------------------------
-    // Circle helpers (helps to understand the orientation of the whole scene)
+    // Reference circles + teleport helper
     // ----------------------------
-
     private lateinit var circleXY: FloatBuffer
     private lateinit var circleYZ: FloatBuffer
     private lateinit var circleZX: FloatBuffer
-    private val circleSegmentCount = 100 // Number of segments for each circle (smoothness)
-    private val circleModelMatrix = FloatArray(16) // Transformation matrix for drawing circles
+    private val circleSegmentCount = 100
+    private val circleModelMatrix = FloatArray(16)
 
-    // ----------------------------
-    // Initialization block
-    // ----------------------------
+    // Axis ruler ("repères") — yellow world-axis lines through the pivot, shown while the
+    // pivot is moving (or always, when toggled on). Decoupled from gestures: see AxisRuler.
+    private lateinit var rulerBuffer: FloatBuffer
+    private val prevPivot = FloatArray(3)
+    private var pivotMovingUntilMs = 0L
+    private var showHelpersAlways = false
+    private val HELPER_FADE_MS = 700L // keep the ruler up briefly after motion stops
 
     init {
         if (liveMode) {
-            // Live preview: no file. Points come from previewSource each frame.
             vertexBuffer = ByteBuffer.allocateDirect(0).order(ByteOrder.nativeOrder()).asFloatBuffer()
             pointCount = 0
+            camera.distance = 12f
         } else {
-            // Parse the PCD file and create the vertex buffer
             val parsed = parsePCD(context)
-            vertexBuffer = parsed.first // The float buffer containing 3D points
-            pointCount = parsed.second // The number of points parsed
+            vertexBuffer = parsed.first
+            pointCount = parsed.second
             Log.d("PCD", "Loaded $pointCount points from $fileName")
+            if (hasBounds) {
+                applyBoundsToCamera()
+                pendingInitialFit = true // fit once the surface (aspect) is known
+            }
         }
     }
 
     override fun onSurfaceCreated(gl: GL10?, config: EGLConfig?) {
-        // Set the background color to black (RGBA)
         GLES20.glClearColor(0f, 0f, 0f, 1f)
+        GLES20.glEnable(GLES20.GL_DEPTH_TEST)
 
-        // Initialize 3D circles on the XY, YZ, and ZX planes for reference/grid visualization
         circleXY = CircleGeometry.generateCircle(1.0f, circleSegmentCount, "XY")
         circleYZ = CircleGeometry.generateCircle(1.0f, circleSegmentCount, "YZ")
         circleZX = CircleGeometry.generateCircle(1.0f, circleSegmentCount, "ZX")
+        rulerBuffer = AxisRuler.newBuffer()
 
-        // Load and compile the vertex shader from asset file
         val vertexShader = loadShader(GLES20.GL_VERTEX_SHADER, readShader("shaders/vertex_shader.glsl"))
-        // Load and compile the fragment shader from asset file
         val fragmentShader = loadShader(GLES20.GL_FRAGMENT_SHADER, readShader("shaders/fragment_shader.glsl"))
-
-        // Create an OpenGL program and attach the shaders
         program = GLES20.glCreateProgram().also {
-            GLES20.glAttachShader(it, vertexShader)      // Attach compiled vertex shader
-            GLES20.glAttachShader(it, fragmentShader)    // Attach compiled fragment shader
-            GLES20.glLinkProgram(it)                     // Link the program (prepare it for use)
+            GLES20.glAttachShader(it, vertexShader)
+            GLES20.glAttachShader(it, fragmentShader)
+            GLES20.glLinkProgram(it)
         }
     }
 
-
     override fun onSurfaceChanged(gl: GL10?, width: Int, height: Int) {
-        // Update surface dimensions
         surfaceWidth = width
         surfaceHeight = height
-
-        // Adjust the OpenGL viewport to the new surface size
         GLES20.glViewport(0, 0, width, height)
     }
 
-
     override fun onDrawFrame(gl: GL10?) {
-        // Clear the screen (color and depth buffers)
-        GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT or GLES20.GL_DEPTH_BUFFER_BIT)
+        // Frame delta for animations.
+        val now = SystemClock.uptimeMillis()
+        val dt = if (lastFrameTimeMs == 0L) 16f else (now - lastFrameTimeMs).toFloat()
+        lastFrameTimeMs = now
 
-        // Use the compiled and linked shader program
+        if (pendingInitialFit && surfaceWidth > 1) {
+            camera.frame(aspect(), animate = false)
+            pendingInitialFit = false
+        }
+        camera.update(dt)
+
+        GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT or GLES20.GL_DEPTH_BUFFER_BIT)
         GLES20.glUseProgram(program)
 
-        // --- Update camera view based on mode ---
-        when (_cameraMode) {
-            CameraMode.ORBIT -> updateOrbitCamera()
-            CameraMode.FPV -> updateFPVCamera()
-        }
+        camera.viewMatrix(viewMatrix)
+        camera.projectionMatrix(projectionMatrix, aspect())
 
-        // --- Setup the perspective projection matrix ---
-
-        val ratio = surfaceWidth.toFloat() / surfaceHeight.toFloat()
-        Matrix.perspectiveM(projectionMatrix, 0, 60f, ratio, 1f, 100f)
-
-        // --- Create final MVP (Model-View-Projection) matrix ---
-
+        // --- MVP for the point cloud (identity model) ---
         Matrix.setIdentityM(modelMatrix, 0)
         val mvpMatrix = FloatArray(16)
         Matrix.multiplyMM(mvpMatrix, 0, projectionMatrix, 0, viewMatrix, 0)
         Matrix.multiplyMM(mvpMatrix, 0, mvpMatrix, 0, modelMatrix, 0)
-
-        // Pass the MVP matrix to the shader
         val mvpHandle = GLES20.glGetUniformLocation(program, "u_MVPMatrix")
         GLES20.glUniformMatrix4fv(mvpHandle, 1, false, mvpMatrix, 0)
 
         // --- Render the point cloud (file buffer, or the live preview when streaming) ---
-
         val source = previewSource
         val drawBuffer: FloatBuffer
         val drawCount: Int
@@ -200,7 +169,6 @@ class MyGLRenderer(
 
         val posHandle = GLES20.glGetAttribLocation(program, "a_Position")
         val colorHandle = GLES20.glGetUniformLocation(program, "u_Color")
-        // Give points an explicit, visible color (the shader colors via u_Color).
         GLES20.glUniform4f(colorHandle, 0.85f, 0.9f, 1f, 1f)
         GLES20.glEnableVertexAttribArray(posHandle)
         drawBuffer.position(0)
@@ -208,118 +176,120 @@ class MyGLRenderer(
         GLES20.glDrawArrays(GLES20.GL_POINTS, 0, drawCount)
         GLES20.glDisableVertexAttribArray(posHandle)
 
-        // --- Draw the 3D axis circles at the origin ---
-        if (_cameraMode == CameraMode.ORBIT) {
-            // Reset model matrix and move to target position
-            Matrix.setIdentityM(circleModelMatrix, 0)
-            Matrix.translateM(circleModelMatrix, 0, orbitTarget[0], orbitTarget[1], orbitTarget[2])
+        // --- Reference circles at the pivot (scaled to stay visible across the range) ---
+        val pivotScale = camera.camDist() * 0.07f
+        drawMarkerCircles(camera.pivot, pivotScale,
+            floatArrayOf(1f, 0f, 0f, 1f), floatArrayOf(0f, 1f, 0f, 1f), floatArrayOf(0f, 0f, 1f, 1f))
 
-            // Draw the circles in red (XY plane), green (YZ plane), and blue (ZX plane)
-            drawCircle(circleXY, floatArrayOf(1f, 0f, 0f, 1f), circleModelMatrix) // XY - red
-            drawCircle(circleYZ, floatArrayOf(0f, 1f, 0f, 1f), circleModelMatrix) // YZ - green
-            drawCircle(circleZX, floatArrayOf(0f, 0f, 1f, 1f), circleModelMatrix) // ZX - blue
-        }
-
-        // --- Live preview: mark the current sensor position with reference circles ---
+        // --- Live preview: current sensor pose marker (amber) ---
         poseMarker?.let { p ->
-            Matrix.setIdentityM(circleModelMatrix, 0)
-            Matrix.translateM(circleModelMatrix, 0, p[0], p[1], p[2])
-            drawCircle(circleXY, floatArrayOf(1f, 0.85f, 0f, 1f), circleModelMatrix) // amber
-            drawCircle(circleYZ, floatArrayOf(1f, 0.85f, 0f, 1f), circleModelMatrix)
-            drawCircle(circleZX, floatArrayOf(1f, 0.85f, 0f, 1f), circleModelMatrix)
-        }
-    }
-
-    // --- Camera Update Methods ---
-
-    private fun updateOrbitCamera() {
-        // Apply auto-level if enabled
-        if (autoLevelEnabled) {
-            // Smoothly interpolate pitch to horizontal (0 degrees)
-            targetOrbitPitch = 0f
-            val pitchDiff = targetOrbitPitch - orbitPitch
-            orbitPitch += pitchDiff * autoLevelLerpSpeed
+            val amber = floatArrayOf(1f, 0.85f, 0f, 1f)
+            drawMarkerCircles(p, camera.camDist() * 0.05f, amber, amber, amber)
         }
 
-        // Convert yaw and pitch from degrees to radians
-        val yawRad = Math.toRadians(orbitYaw.toDouble()).toFloat()
-        val pitchRad = Math.toRadians(orbitPitch.toDouble()).toFloat()
-
-        // Calculate camera eye position in 3D space based on orbit parameters
-        val eyeX = orbitTarget[0] + orbitDistance * cos(pitchRad) * sin(yawRad)
-        val eyeY = orbitTarget[1] + orbitDistance * sin(pitchRad)
-        val eyeZ = orbitTarget[2] + orbitDistance * cos(pitchRad) * cos(yawRad)
-
-        // Set up vector to keep horizon level (always Y-up)
-        val upY = if (cos(pitchRad) > 0) 1f else -1f
-
-        // Create the view matrix based on camera position and orientation
-        Matrix.setLookAtM(viewMatrix, 0, eyeX, eyeY, eyeZ, orbitTarget[0], orbitTarget[1], orbitTarget[2], 0f, upY, 0f)
+        // --- Axis ruler: show whenever the pivot is moving (or always, if toggled). ---
+        // Driven purely by detecting pivot motion, so any code that moves the pivot lights it up.
+        if (pivotMoved()) pivotMovingUntilMs = now + HELPER_FADE_MS
+        if (showHelpersAlways || now < pivotMovingUntilMs) drawRuler()
     }
 
-    private fun updateFPVCamera() {
-        // Apply auto-level if enabled
-        if (autoLevelEnabled) {
-            // Smoothly interpolate pitch and roll to horizontal
-            val pitchDiff = 0f - fpvPitch
-            fpvPitch += pitchDiff * autoLevelLerpSpeed
-            val rollDiff = 0f - fpvRoll
-            fpvRoll += rollDiff * autoLevelLerpSpeed
+    private fun pivotMoved(): Boolean {
+        val dx = camera.pivot[0] - prevPivot[0]
+        val dy = camera.pivot[1] - prevPivot[1]
+        val dz = camera.pivot[2] - prevPivot[2]
+        val moved = dx * dx + dy * dy + dz * dz > 1e-9f
+        prevPivot[0] = camera.pivot[0]; prevPivot[1] = camera.pivot[1]; prevPivot[2] = camera.pivot[2]
+        return moved
+    }
+
+    private fun aspect(): Float = surfaceWidth.toFloat() / surfaceHeight.toFloat()
+
+    // ====== Gesture entry points (called on the GL thread via queueEvent) ======
+
+    fun camOrbit(dxPx: Float, dyPx: Float) = camera.orbit(dxPx, dyPx)
+    fun camDolly(spreadDeltaPx: Float) = camera.dolly(spreadDeltaPx)
+    fun camPan(dxPx: Float, dyPx: Float) = camera.pan(dxPx, dyPx, surfaceHeight)
+
+    /** Frame the whole cloud. Recomputes bounds from the live preview when streaming. */
+    fun frameAll() {
+        val source = previewSource
+        if (source != null) {
+            if (computeBounds(source.buffer, source.pointCount)) applyBoundsToCamera()
         }
-
-        // Convert angles from degrees to radians
-        val yawRad = Math.toRadians(fpvYaw.toDouble()).toFloat()
-        val pitchRad = Math.toRadians(fpvPitch.toDouble()).toFloat()
-        val rollRad = Math.toRadians(fpvRoll.toDouble()).toFloat()
-
-        // Calculate forward direction
-        val lookAtX = fpvPosition[0] + cos(pitchRad) * sin(yawRad)
-        val lookAtY = fpvPosition[1] + sin(pitchRad)
-        val lookAtZ = fpvPosition[2] + cos(pitchRad) * cos(yawRad)
-
-        // Calculate camera's up vector with roll
-        // First get the base up vector (perpendicular to look direction)
-        val baseUpX = -sin(pitchRad) * sin(yawRad)
-        val baseUpY = cos(pitchRad)
-        val baseUpZ = -sin(pitchRad) * cos(yawRad)
-
-        // Calculate right vector (perpendicular to forward and up)
-        val rightX = cos(yawRad)
-        val rightY = 0f
-        val rightZ = -sin(yawRad)
-
-        // Apply roll rotation around the forward vector
-        val upX = baseUpX * cos(rollRad) + rightX * sin(rollRad)
-        val upY = baseUpY * cos(rollRad) + rightY * sin(rollRad)
-        val upZ = baseUpZ * cos(rollRad) + rightZ * sin(rollRad)
-
-        // Create the view matrix for FPV camera
-        Matrix.setLookAtM(viewMatrix, 0,
-            fpvPosition[0], fpvPosition[1], fpvPosition[2],  // Eye position
-            lookAtX, lookAtY, lookAtZ,                        // Look at
-            upX, upY, upZ)                                    // Up vector with roll
+        if (hasBounds || source != null) camera.frame(aspect(), animate = true)
     }
 
-    private fun readShader(name: String): String {
-        // Read shader code from assets folder
-        return context.assets.open(name).bufferedReader().use { it.readText() }
+    /** Double-tap-then-drag → slide the pivot along the world-up (Z) axis, live. */
+    fun zSlideMove(dyPx: Float) = camera.moveVertical(dyPx, surfaceHeight)
+
+    /** Force the axis ruler on (true) or back to auto-show-while-moving (false). */
+    fun setHelpersAlways(on: Boolean) { showHelpersAlways = on }
+
+    fun setOrthographic(on: Boolean) { camera.orthographic = on }
+
+    private fun drawRuler() {
+        val count = AxisRuler.build(rulerBuffer, camera.pivot, camera.camDist())
+        if (count == 0) return
+        val mvp = FloatArray(16)
+        Matrix.multiplyMM(mvp, 0, projectionMatrix, 0, viewMatrix, 0)
+        val posHandle = GLES20.glGetAttribLocation(program, "a_Position")
+        val colorHandle = GLES20.glGetUniformLocation(program, "u_Color")
+        val mvpHandle = GLES20.glGetUniformLocation(program, "u_MVPMatrix")
+        GLES20.glUniformMatrix4fv(mvpHandle, 1, false, mvp, 0)
+        GLES20.glUniform4f(colorHandle, 1f, 0.92f, 0.2f, 1f) // yellow
+        GLES20.glEnableVertexAttribArray(posHandle)
+        rulerBuffer.position(0)
+        GLES20.glVertexAttribPointer(posHandle, 3, GLES20.GL_FLOAT, false, 0, rulerBuffer)
+        GLES20.glDrawArrays(GLES20.GL_LINES, 0, count)
+        GLES20.glDisableVertexAttribArray(posHandle)
     }
 
-    private fun loadShader(type: Int, code: String): Int {
-        // Create and compile a shader of the given type (vertex or fragment)
-        return GLES20.glCreateShader(type).also {
+    // ====== Bounds ======
+
+    /** Track min/max while streaming xyz into [out]; returns false if empty. */
+    private fun computeBounds(buffer: FloatBuffer, count: Int): Boolean {
+        if (count <= 0) return false
+        var minX = Float.MAX_VALUE; var minY = Float.MAX_VALUE; var minZ = Float.MAX_VALUE
+        var maxX = -Float.MAX_VALUE; var maxY = -Float.MAX_VALUE; var maxZ = -Float.MAX_VALUE
+        for (i in 0 until count) {
+            val o = i * 3
+            val x = buffer.get(o); val y = buffer.get(o + 1); val z = buffer.get(o + 2)
+            if (x < minX) minX = x; if (x > maxX) maxX = x
+            if (y < minY) minY = y; if (y > maxY) maxY = y
+            if (z < minZ) minZ = z; if (z > maxZ) maxZ = z
+        }
+        boundsMin[0] = minX; boundsMin[1] = minY; boundsMin[2] = minZ
+        boundsMax[0] = maxX; boundsMax[1] = maxY; boundsMax[2] = maxZ
+        hasBounds = true
+        return true
+    }
+
+    private fun applyBoundsToCamera() {
+        val cx = (boundsMin[0] + boundsMax[0]) * 0.5f
+        val cy = (boundsMin[1] + boundsMax[1]) * 0.5f
+        val cz = (boundsMin[2] + boundsMax[2]) * 0.5f
+        val rx = (boundsMax[0] - boundsMin[0]) * 0.5f
+        val ry = (boundsMax[1] - boundsMin[1]) * 0.5f
+        val rz = (boundsMax[2] - boundsMin[2]) * 0.5f
+        val radius = sqrt(rx * rx + ry * ry + rz * rz).coerceAtLeast(0.5f)
+        camera.setScene(cx, cy, cz, radius)
+    }
+
+    // ====== Shaders / parsing (unchanged pipeline) ======
+
+    private fun readShader(name: String): String =
+        context.assets.open(name).bufferedReader().use { it.readText() }
+
+    private fun loadShader(type: Int, code: String): Int =
+        GLES20.glCreateShader(type).also {
             GLES20.glShaderSource(it, code)
             GLES20.glCompileShader(it)
         }
-    }
 
     private fun parsePCD(context: Context): Pair<FloatBuffer, Int> {
-        // Read the PCD file header from the local scans directory
         val reader = BufferedReader(InputStreamReader(openScanFile(context)))
         val headerLines = mutableListOf<String>()
         var line: String?
-
-        // Read PCD header lines until we hit the DATA line
         while (true) {
             line = reader.readLine() ?: break
             headerLines.add(line)
@@ -327,202 +297,81 @@ class MyGLRenderer(
         }
         reader.close()
 
-        // Extract the number of points from the header ("POINTS" line)
         val pointCount = headerLines.firstOrNull { it.startsWith("POINTS") }
             ?.split(" ")?.getOrNull(1)?.toIntOrNull() ?: 0
 
-        // Reopen to read the binary point cloud data
         val binaryStream = openScanFile(context)
-
-        // Skip the header portion to reach binary data
         val skip = headerLines.joinToString("\n").toByteArray().size + 1
         binaryStream.skip(skip.toLong())
 
-        // Read the point cloud data (each point is 8 floats of 4 bytes each: x, y, z, intensity...)
         val byteArray = ByteArray(pointCount * 8 * 4)
         binaryStream.read(byteArray)
         binaryStream.close()
 
-        // Wrap the byte array into a FloatBuffer using little-endian byte order
         val sourceBuffer = ByteBuffer.wrap(byteArray).order(ByteOrder.LITTLE_ENDIAN).asFloatBuffer()
 
-        // Prepare a FloatBuffer for OpenGL, storing only x, y, z (3 floats per point)
-        // *NOTE* : Add intensity
         val floatBuffer = ByteBuffer.allocateDirect(pointCount * 3 * 4)
             .order(ByteOrder.nativeOrder())
             .asFloatBuffer()
 
-        // Populate floatBuffer with only x, y, z from the source buffer
-        // *NOTE* : Add intensity (i*8+3)
+        var minX = Float.MAX_VALUE; var minY = Float.MAX_VALUE; var minZ = Float.MAX_VALUE
+        var maxX = -Float.MAX_VALUE; var maxY = -Float.MAX_VALUE; var maxZ = -Float.MAX_VALUE
         for (i in 0 until pointCount) {
-            floatBuffer.put(sourceBuffer.get(i * 8))
-            floatBuffer.put(sourceBuffer.get(i * 8 + 1))
-            floatBuffer.put(sourceBuffer.get(i * 8 + 2))
+            val x = sourceBuffer.get(i * 8)
+            val y = sourceBuffer.get(i * 8 + 1)
+            val z = sourceBuffer.get(i * 8 + 2)
+            floatBuffer.put(x); floatBuffer.put(y); floatBuffer.put(z)
+            if (x < minX) minX = x; if (x > maxX) maxX = x
+            if (y < minY) minY = y; if (y > maxY) maxY = y
+            if (z < minZ) minZ = z; if (z > maxZ) maxZ = z
         }
-        floatBuffer.flip() // Finalize the buffer for use in OpenGL
+        floatBuffer.flip()
 
-        // Return the final buffer and the number of points
+        if (pointCount > 0) {
+            boundsMin[0] = minX; boundsMin[1] = minY; boundsMin[2] = minZ
+            boundsMax[0] = maxX; boundsMax[1] = maxY; boundsMax[2] = maxZ
+            hasBounds = true
+        }
+
         return floatBuffer to pointCount
     }
 
+    // ====== Circle drawing ======
 
-    // ====Public Camera Control Methods=====
-
-    // Switch camera mode and synchronize camera positions
-    fun setCameraMode(mode: CameraMode) {
-        if (_cameraMode != mode) {
-            when (mode) {
-                CameraMode.FPV -> {
-                    // Switching to FPV: place FPV camera at current orbit camera position
-                    val yawRad = Math.toRadians(orbitYaw.toDouble()).toFloat()
-                    val pitchRad = Math.toRadians(orbitPitch.toDouble()).toFloat()
-
-                    // Calculate current orbit camera eye position
-                    fpvPosition[0] = orbitTarget[0] + orbitDistance * cos(pitchRad) * sin(yawRad)
-                    fpvPosition[1] = orbitTarget[1] + orbitDistance * sin(pitchRad)
-                    fpvPosition[2] = orbitTarget[2] + orbitDistance * cos(pitchRad) * cos(yawRad)
-
-                    // Set FPV orientation to look at the orbit target
-                    fpvYaw = orbitYaw
-                    fpvPitch = orbitPitch
-                }
-                CameraMode.ORBIT -> {
-                    // Switching to Orbit: center orbit on current FPV view direction
-                    // Calculate where the FPV camera is looking
-                    val yawRad = Math.toRadians(fpvYaw.toDouble()).toFloat()
-                    val pitchRad = Math.toRadians(fpvPitch.toDouble()).toFloat()
-
-                    // Set orbit target to a point in front of FPV camera
-                    val lookDistance = 10f
-                    orbitTarget[0] = fpvPosition[0] + lookDistance * cos(pitchRad) * sin(yawRad)
-                    orbitTarget[1] = fpvPosition[1] + lookDistance * sin(pitchRad)
-                    orbitTarget[2] = fpvPosition[2] + lookDistance * cos(pitchRad) * cos(yawRad)
-
-                    // Set orbit orientation
-                    orbitYaw = fpvYaw
-                    orbitPitch = fpvPitch
-                    orbitDistance = lookDistance
-                }
-            }
-            _cameraMode = mode
-        }
+    /** Draw the three reference circles centered at [center], uniformly scaled by [scale]. */
+    private fun drawMarkerCircles(
+        center: FloatArray, scale: Float,
+        colXY: FloatArray, colYZ: FloatArray, colZX: FloatArray
+    ) {
+        Matrix.setIdentityM(circleModelMatrix, 0)
+        Matrix.translateM(circleModelMatrix, 0, center[0], center[1], center[2])
+        Matrix.scaleM(circleModelMatrix, 0, scale, scale, scale)
+        drawCircle(circleXY, colXY, circleModelMatrix)
+        drawCircle(circleYZ, colYZ, circleModelMatrix)
+        drawCircle(circleZX, colZX, circleModelMatrix)
     }
 
-    // --- Orbit Camera Controls ---
-
-    // Rotate the orbit camera around the target based on user touch drag
-    fun rotateOrbit(dYaw: Float, dPitch: Float) {
-        orbitYaw += dYaw
-        orbitPitch -= dPitch
-        orbitPitch %= 360f // Keep pitch within 0-360 degrees
-    }
-
-    // Zoom the orbit camera in or out by adjusting the distance to the target
-    fun zoomOrbitCamera(delta: Float) {
-        orbitDistance -= delta
-        orbitDistance = orbitDistance.coerceIn(1f, 100f) // Clamp zoom range
-    }
-
-    // Pan the orbit camera's target based on screen drag
-    fun panOrbitTarget(dx: Float, dy: Float) {
-        // Scale movement with distance
-        val panSpeed = orbitDistance * 0.001f
-        val yawRad = Math.toRadians(orbitYaw.toDouble()).toFloat()
-        val right = floatArrayOf(
-            -cos(yawRad),
-            sin(yawRad),
-            0f
-        )
-        val up = floatArrayOf(0f, 0f, 1f) // Up vector in Z-axis
-
-        orbitTarget[0] += right[0] * dx * panSpeed + up[0] * dy * panSpeed
-        orbitTarget[1] += right[1] * dx * panSpeed + up[1] * dy * panSpeed
-        orbitTarget[2] += right[2] * dx * panSpeed + up[2] * dy * panSpeed
-    }
-
-    // --- FPV Camera Controls ---
-
-    // Rotate FPV camera view direction (flight simulator style - camera relative)
-    fun rotateFPV(dYaw: Float, dPitch: Float) {
-        // Apply yaw rotation around camera's current up vector (affected by pitch)
-        // In flight sim: yaw is relative to camera orientation, not world
-        fpvYaw += dYaw * cos(Math.toRadians(fpvPitch.toDouble())).toFloat()
-
-        // Apply pitch rotation
-        fpvPitch -= dPitch
-        fpvPitch = fpvPitch.coerceIn(-89f, 89f) // Prevent flipping
-
-        // In flight mode, yaw wraps around naturally
-        fpvYaw %= 360f
-    }
-
-    // Move FPV camera position
-    fun moveFPV(forward: Float, right: Float, up: Float) {
-        val yawRad = Math.toRadians(fpvYaw.toDouble()).toFloat()
-        val pitchRad = Math.toRadians(fpvPitch.toDouble()).toFloat()
-
-        // Forward/backward movement (along viewing direction, but only XZ plane)
-        val forwardDir = floatArrayOf(
-            sin(yawRad),
-            0f,
-            cos(yawRad)
-        )
-
-        // Right/left movement (perpendicular to forward)
-        val rightDir = floatArrayOf(
-            cos(yawRad),
-            0f,
-            -sin(yawRad)
-        )
-
-        // Apply movement
-        val moveSpeed = 0.1f
-        fpvPosition[0] += (forwardDir[0] * forward + rightDir[0] * right) * moveSpeed
-        fpvPosition[1] += up * moveSpeed
-        fpvPosition[2] += (forwardDir[2] * forward + rightDir[2] * right) * moveSpeed
-    }
-
-
-    // =====for Circles========
-
-    // Draws a colored circle using the provided vertex buffer and model matrix
-    fun drawCircle(buffer: FloatBuffer, color: FloatArray, modelMatrix: FloatArray) {
-        val mvpMatrix = FloatArray(16) // Final combined Model-View-Projection matrix
-        val tempMatrix = FloatArray(16) // Temporary matrix for intermediate calculations
-
-        // Combine view and model matrices first
+    private fun drawCircle(buffer: FloatBuffer, color: FloatArray, modelMatrix: FloatArray) {
+        val mvpMatrix = FloatArray(16)
+        val tempMatrix = FloatArray(16)
         Matrix.multiplyMM(tempMatrix, 0, viewMatrix, 0, modelMatrix, 0)
-        // Then apply the projection matrix
         Matrix.multiplyMM(mvpMatrix, 0, projectionMatrix, 0, tempMatrix, 0)
 
-        // Get the shader attribute and uniform locations
         val positionHandle = GLES20.glGetAttribLocation(program, "a_Position")
         val colorHandle = GLES20.glGetUniformLocation(program, "u_Color")
         val mvpHandle = GLES20.glGetUniformLocation(program, "u_MVPMatrix")
 
-        // Pass the final MVP matrix to the shader
         GLES20.glUniformMatrix4fv(mvpHandle, 1, false, mvpMatrix, 0)
-
-        // Enable the position attribute and bind the circle vertex buffer
         GLES20.glEnableVertexAttribArray(positionHandle)
+        buffer.position(0)
         GLES20.glVertexAttribPointer(positionHandle, 3, GLES20.GL_FLOAT, false, 0, buffer)
-
-        // Pass the color uniform to the shader
         GLES20.glUniform4fv(colorHandle, 1, color, 0)
-
-        // Draw the circle as a connected loop of lines
         GLES20.glDrawArrays(GLES20.GL_LINE_LOOP, 0, circleSegmentCount + 1)
-
-        // Disable the position attribute after drawing
         GLES20.glDisableVertexAttribArray(positionHandle)
     }
 
-    // Getter to retrieve the number of points loaded from the point cloud file
-    fun getPointCount(): Int {
-        return pointCount
-    }
+    fun getPointCount(): Int = pointCount
 
-    // Open the scan's .pcd from the shared local scans directory.
     private fun openScanFile(context: Context): java.io.InputStream {
         val file = File(LocalScanStorage.scansDir(context), fileName)
         if (!file.exists()) {
@@ -530,5 +379,4 @@ class MyGLRenderer(
         }
         return FileInputStream(file)
     }
-
 }

@@ -286,6 +286,8 @@ fun ActiveScanScreen(
     val scanStatus by viewModel.scanStatus
 
     var glView by remember { mutableStateOf<MyGLSurfaceView?>(null) }
+    var helpersOn by remember { mutableStateOf(false) }
+    var orthographic by remember { mutableStateOf(false) }
 
     DisposableEffect(Unit) {
         viewModel.startPolling()
@@ -346,6 +348,18 @@ fun ActiveScanScreen(
                 )
             }
         }
+
+        // Viewer options (frame-all, ruler, projection) — same cluster as the saved-PCD viewer.
+        ViewerOptionsCluster(
+            helpersOn = helpersOn,
+            orthographic = orthographic,
+            onFrameAll = { glView?.frameAll() },
+            onToggleHelpers = { helpersOn = !helpersOn; glView?.setHelpersAlways(helpersOn) },
+            onToggleProjection = { orthographic = !orthographic; glView?.setOrthographic(orthographic) },
+            modifier = Modifier
+                .align(Alignment.BottomStart)
+                .padding(24.dp)
+        )
 
         // Stop & Save
         Button(

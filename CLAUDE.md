@@ -123,8 +123,15 @@ JSON pose `{type:"pose", x, y, z, ...}` (~10 Hz).
 
 - **SettingsScreen.kt** — edit/normalize the Jetson base URL; shows live connection state.
 
-- **PCDViewerScreen.kt** — the kept 3D viewer wrapper, with its own top bar hosting the
-  camera menu (Style Caméra, Mode de contrôle, Auto-Level) and a back action.
+- **PCDViewerScreen.kt** — the 3D viewer wrapper: a back action and the **viewer options
+  cluster** (`ViewerControls.kt`). The camera is gesture-only (see the OpenGL viewer section);
+  there is no camera-style / control-mode / auto-level menu.
+
+- **ViewerControls.kt** — `ViewerOptionsCluster`: an icon-only access FAB toggling a panel of
+  child actions (pressing any child auto-collapses it). Children: **Tout afficher** (frame-all),
+  **Repères** (axis-ruler always-on toggle), **Projection** (perspective ⇄ orthographic toggle);
+  toggles are tinted when active. Caller owns the toggle state and pushes it to the GL view.
+  Reused by both `PCDViewerScreen` and `ActiveScanScreen`. New future view options go here.
 
 #### Phase 2 — scan control + live preview
 - **ScanControlViewModel.kt** (`AndroidViewModel`) — polls `/status` + `/scan/status`,
@@ -152,17 +159,39 @@ JSON pose `{type:"pose", x, y, z, ...}` (~10 Hz).
 - **PreviewStreamManager.kt** — owns the `/ws/preview` WebSocket: decodes little-endian
   binary frames off the main thread, applies pose, and auto-reconnects with backoff while
   `/scan/status` says a scan is running.
-- The **same renderer** draws the preview: `MyGLRenderer`/`MyGLSurfaceView` gained a
-  `liveMode` that reads `previewSource: PreviewCloud` each frame and draws a pose marker;
-  the camera controls are reused unchanged.
+- The **same renderer** draws the preview: `MyGLRenderer`/`MyGLSurfaceView` have a `liveMode`
+  that reads `previewSource: PreviewCloud` each frame and draws a pose marker; the orbit
+  camera is shared with the file viewer.
 
-#### OpenGL viewer (kept as-is — the payoff, do not rewrite)
-- **MyGLSurfaceView.kt / MyGLRenderer.kt** — OpenGL ES 2.0 point-cloud renderer. The PCD
-  parser reads a binary `.pcd` (8 floats/point; renders x,y,z) from `LocalScanStorage`.
-- **Dual camera** (`CameraMode` ORBIT / FPV) with reference RGB circles in orbit mode.
-- **CameraController.kt / VirtualJoystick.kt** — control modes (`ControlMode` TOUCH /
-  JOYSTICK / SPLIT), dual virtual joysticks for FPV, and the Auto-Level toggle
-  (persisted in SharedPreferences `app_prefs`).
+#### OpenGL viewer + orbit camera
+- **MyGLSurfaceView.kt / MyGLRenderer.kt** — OpenGL ES 2.0 point-cloud renderer (depth-tested
+  `GL_POINTS`). The PCD parser reads a binary `.pcd` (8 floats/point; renders x,y,z) from
+  `LocalScanStorage` and computes the cloud's bounding box for Frame-All. The vertex/draw
+  pipeline is unchanged from the original; only the camera was rebuilt.
+- **OrbitCamera.kt** — the single-state camera (the camera rebuild). State is one coherent set:
+  `pivot`, `distance`, `yawDeg`, `pitchDeg` (no roll). Eye = `pivot + distance·dir` where `dir`
+  is **Z-up spherical** (yaw around +Z, pitch = elevation; singularity only at ±90°, guarded by
+  the ±89° clamp). It always looks at the pivot with a fixed `worldUp` (currently **Z** — flip
+  the constant if the frame changes). Dolly/pan speeds and the near/far clip planes all scale
+  with `distance`. `orthographic` flag switches `projectionMatrix` to an FOV-matched ortho frustum.
+  **FPV-ready**: a future FPV mode is just "distance → ~0, drive the pivot" — do not split this
+  into separate cameras.
+- **Gestures** (all 1:1, no smoothing; handled in `MyGLSurfaceView`, forwarded to the renderer
+  via `queueEvent` so camera mutation stays on the GL thread):
+  - one-finger drag → **orbit** (yaw wraps; pitch clamps ±89°);
+  - two-finger pinch → **dolly** (through-pivot, ~1000:1 range, physical move not FOV);
+  - two-finger drag → **pan**: left/right slides along the camera's screen-right; up/down **walks
+    the pivot along the cave floor** (view direction projected onto the ground plane — fingers
+    down = forward), so tilt never drives you into the floor;
+  - **double-tap-then-drag → live Z-slide**: the still-down finger's vertical drag slides the
+    pivot along world-up (Z) in real time (`OrbitCamera.moveVertical`); double-tap without a drag
+    does nothing. (The old depth-ray teleport was removed.)
+  - Only **Frame-All** ("Tout afficher") animates (~0.3 s ease-out); it refits the whole cloud.
+- **AxisRuler.kt** — yellow 3-axis "ruler" (lines through the pivot + meter tick marks at fixed
+  world graduations, so a moving pivot visibly slides through them). Step adapts to zoom
+  (1 m → 10 m → 100 m → 1 km…) to bound the tick count. **Decoupled from gestures**: the renderer
+  detects pivot motion frame-to-frame and shows the ruler (0.7 s fade-out), so anything that moves
+  the pivot lights it up. The **Repères** toggle forces it always-on.
 
 ### Data Flow
 
@@ -199,9 +228,9 @@ the Jetson; re-entering reconnects; a dropped socket auto-reconnects with backof
 
 ## Known TODOs and Future Work
 
-- **Camera control rewrite**: the OpenGL camera/control code (`MyGLRenderer` camera methods,
-  `CameraController`, control modes) is experimental and due for a clean rewrite — keep
-  Phase 2's live-preview *data path* (`previewSource`, pose marker) when doing so.
+- **Camera FPV mode** (Phase 2 of the camera rebuild): `OrbitCamera` is architected for it
+  ("distance → ~0, pivot glued to camera") — add it on top of the existing state, don't fork
+  a second camera. No roll.
 - Use the streamed `intensity` (4th float) for per-point coloring (shader currently uses a
   single uniform color; intensity is parsed but ignored).
 - When the preview hits its point cap it stops adding new voxels — consider coarsening or

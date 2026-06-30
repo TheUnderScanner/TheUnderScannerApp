@@ -98,12 +98,20 @@ class ScanLibraryViewModel(app: Application) : AndroidViewModel(app) {
     private suspend fun pollStatusOnce() {
         client.getStatus().fold(
             onSuccess = { status ->
-                _connection.value = ConnectionState.Connected(status)
+                // Only publish a new state on an actual category change. The status payload
+                // (its `time`) differs every poll, and reassigning it every 3s would recompose
+                // the whole screen — including the scan list — and jank scrolling. The fields
+                // the UI shows (hostname/version) are constant for a session.
+                if (_connection.value !is ConnectionState.Connected) {
+                    _connection.value = ConnectionState.Connected(status)
+                }
                 // First time we reach the server, pull the scan list automatically.
                 if (!loadedFromServerOnce) refreshSuspending()
             },
             onFailure = { e ->
-                _connection.value = ConnectionState.Offline(e.message ?: "Injoignable")
+                if (_connection.value !is ConnectionState.Offline) {
+                    _connection.value = ConnectionState.Offline(e.message ?: "Injoignable")
+                }
             }
         )
     }
@@ -215,7 +223,16 @@ class ScanLibraryViewModel(app: Application) : AndroidViewModel(app) {
         val destination = LocalScanStorage.pcdFile(context, scan.name)
         downloadProgress[scan.name] = -1f
         val job = viewModelScope.launch {
-            client.downloadPcd(scan.name, destination) { p -> downloadProgress[scan.name] = p }
+            // Throttle to whole-percent changes: the streamer fires per 64 KB chunk (hundreds
+            // of times/sec on WiFi), and writing the snapshot map that often floods recomposition.
+            var lastPct = Int.MIN_VALUE
+            client.downloadPcd(scan.name, destination) { p ->
+                val pct = if (p < 0f) -1 else (p * 100).toInt()
+                if (pct != lastPct) {
+                    lastPct = pct
+                    downloadProgress[scan.name] = p
+                }
+            }
                 .fold(
                     onSuccess = {
                         downloadProgress.remove(scan.name)
