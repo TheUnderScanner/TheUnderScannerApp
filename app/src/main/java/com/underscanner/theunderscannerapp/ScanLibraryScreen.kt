@@ -21,11 +21,9 @@ import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
-import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.graphics.Color
-import androidx.compose.foundation.text.KeyboardOptions
 import kotlinx.coroutines.launch
 import org.json.JSONObject
 
@@ -459,8 +457,6 @@ private fun NotesDialog(
     var saving by remember { mutableStateOf(false) }
 
     var site by remember { mutableStateOf("") }
-    var conditions by remember { mutableStateOf("") }
-    var estimatedLength by remember { mutableStateOf("") }
     var issues by remember { mutableStateOf("") }
     var free by remember { mutableStateOf("") }
 
@@ -468,8 +464,6 @@ private fun NotesDialog(
         viewModel.fetchNotes(scan.name).fold(
             onSuccess = { json ->
                 site = json.optString("site", "")
-                conditions = json.optString("conditions", "")
-                estimatedLength = json.opt("estimated_length_m")?.toString() ?: ""
                 issues = json.optString("issues", "")
                 free = json.optString("free", "")
                 loading = false
@@ -495,14 +489,6 @@ private fun NotesDialog(
                     verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
                     OutlinedTextField(site, { site = it }, label = { Text("Site") }, singleLine = true, modifier = Modifier.fillMaxWidth())
-                    OutlinedTextField(conditions, { conditions = it }, label = { Text("Conditions (humide / sec / étroit)") }, singleLine = true, modifier = Modifier.fillMaxWidth())
-                    OutlinedTextField(
-                        estimatedLength, { estimatedLength = it },
-                        label = { Text("Longueur estimée (m)") },
-                        singleLine = true,
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                        modifier = Modifier.fillMaxWidth()
-                    )
                     OutlinedTextField(issues, { issues = it }, label = { Text("Problèmes rencontrés") }, modifier = Modifier.fillMaxWidth().heightIn(min = 80.dp))
                     OutlinedTextField(free, { free = it }, label = { Text("Notes libres") }, modifier = Modifier.fillMaxWidth().heightIn(min = 80.dp))
                 }
@@ -515,8 +501,6 @@ private fun NotesDialog(
                     saving = true
                     val json = JSONObject().apply {
                         put("site", site)
-                        put("conditions", conditions)
-                        estimatedLength.trim().toDoubleOrNull()?.let { put("estimated_length_m", it) }
                         put("issues", issues)
                         put("free", free)
                     }

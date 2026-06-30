@@ -78,8 +78,10 @@ Settings (the hotspot-assigned IP changes between sessions); default is in
 | POST | `/system/shutdown` | Power the Jetson off | `{ok}`; **409** if a scan is running |
 
 `ScanInfo` carries `name, date, location, run` plus artifact sub-objects `bag`, `pcd`
-(`{present, size_bytes, size_human}`), `config`, and `notes` (`{present, text}` — `text` is the
-free-text notes content, surfaced in `ScanInfo.notesText` for client-side search).
+(`{present, size_bytes, size_human}`), `config`, and `notes` (`{present, ...}`). For search,
+`ScanInfo.notesText` flattens whatever note content the list embeds (`flattenJsonText`); since the
+list endpoint typically reports only note *presence*, the ViewModel also fetches each scan's notes
+once from `/scans/{name}/notes` and merges the text into the searchable list (cached per session).
 
 **WebSocket `ws://<jetson>/ws/preview`:** binary message = one frame: little-endian `uint32`
 N then `N×(x,y,z,intensity)` float32 (16 bytes/point, world frame, accumulate). Text message =
@@ -117,9 +119,10 @@ JSON pose `{type:"pose", x, y, z, ...}` (~10 Hz).
   (→ Settings), pull-to-refresh, one row per scan (bag size, PCD Download/Open + progress,
   Config view, Notes edit). The top bar also has **search** (fuzzy: case-insensitive, separator-
   tolerant so `cave-x`/`cave_x`/`cave x` match; scans name/location/date/notes text) and a
-  **sort** menu (date or name, both directions; persisted). Both are client-side and work
-  offline. Hosts the read-only **Config** dialog and the structured **Notes** form dialog
-  (`site, conditions, estimated_length_m, issues, free`).
+  **sort** menu (date / name both directions, plus PCD size and bag size descending; persisted).
+  Both are client-side and work offline. Hosts the read-only **Config** dialog and the **Notes**
+  form dialog (`site, issues, free`). Legacy `conditions` / `estimated_length_m` fields are no
+  longer shown or written (existing values stay in the Jetson's JSON, just unused).
 
 - **SettingsScreen.kt** — edit/normalize the Jetson base URL; shows live connection state.
 

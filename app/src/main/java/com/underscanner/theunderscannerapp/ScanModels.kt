@@ -1,5 +1,6 @@
 package com.underscanner.theunderscannerapp
 
+import org.json.JSONArray
 import org.json.JSONObject
 
 // ---------------------------------------------------------------------------
@@ -60,9 +61,39 @@ data class ScanInfo(
             pcd = ScanArtifact.from(obj.optJSONObject("pcd")),
             config = ScanArtifact.from(obj.optJSONObject("config")),
             notes = ScanArtifact.from(obj.optJSONObject("notes")),
-            notesText = obj.optJSONObject("notes")?.optString("text", "").orEmpty()
+            notesText = flattenJsonText(obj.optJSONObject("notes"))
         )
     }
+}
+
+/**
+ * Collect every textual value inside a JSON object for client-side search — whether note
+ * content lives under a single `text` key or in the structured form (site / issues / free / …,
+ * plus any legacy fields still in the file). Recurses into nested objects/arrays and skips the
+ * artifact bookkeeping keys. Used both for the notes embedded in the scan list and for the
+ * standalone `GET /scans/{name}/notes` payload.
+ */
+fun flattenJsonText(notes: JSONObject?): String {
+    if (notes == null) return ""
+    val sb = StringBuilder()
+    fun walk(obj: JSONObject) {
+        val keys = obj.keys()
+        while (keys.hasNext()) {
+            val k = keys.next()
+            if (k == "present" || k == "size_bytes" || k == "size_human") continue
+            when (val v = obj.opt(k)) {
+                is JSONObject -> walk(v)
+                is JSONArray -> for (i in 0 until v.length()) {
+                    (v.opt(i) as? JSONObject)?.let { walk(it) }
+                        ?: v.opt(i)?.takeIf { it != JSONObject.NULL }?.let { sb.append(it).append(' ') }
+                }
+                JSONObject.NULL, null -> {}
+                else -> sb.append(v).append(' ')
+            }
+        }
+    }
+    walk(notes)
+    return sb.toString().trim()
 }
 
 /** Readiness heartbeat from `GET /status`. */

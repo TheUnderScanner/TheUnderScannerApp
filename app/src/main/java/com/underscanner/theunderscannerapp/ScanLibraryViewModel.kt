@@ -64,6 +64,11 @@ class ScanLibraryViewModel(app: Application) : AndroidViewModel(app) {
     private var serverScans: List<ScanInfo>? = null
     private var loadedFromServerOnce = false
 
+    // Searchable notes text per scan, fetched on demand from `/scans/{name}/notes` because the
+    // list endpoint only reports note *presence*, not content. Cached for the session so search
+    // over notes works offline once warmed.
+    private val notesTextCache = mutableMapOf<String, String>()
+
     // --- Downloads: scanName -> progress in [0,1], or -1 for indeterminate ---
     val downloadProgress: SnapshotStateMap<String, Float> = mutableStateMapOf()
     private val downloadJobs = mutableMapOf<String, Job>()
@@ -152,7 +157,11 @@ class ScanLibraryViewModel(app: Application) : AndroidViewModel(app) {
         val context = getApplication<Application>()
         val base = serverScans ?: emptyList()
         val known = base.map { scan ->
-            scan.copy(downloadedLocally = LocalScanStorage.isDownloaded(context, scan.name))
+            scan.copy(
+                downloadedLocally = LocalScanStorage.isDownloaded(context, scan.name),
+                // Prefer the fuller notes text we've fetched (the list payload may omit it).
+                notesText = notesTextCache[scan.name] ?: scan.notesText
+            )
         }
         val knownNames = known.map { it.name }.toSet()
 
@@ -161,6 +170,38 @@ class ScanLibraryViewModel(app: Application) : AndroidViewModel(app) {
             .map { localOnlyScan(context, it) }
 
         _allScans.value = known + localOnly
+        recompute()
+        warmNotesCache()
+    }
+
+    /**
+     * Fetch notes content for scans that have notes but no cached searchable text yet, so the
+     * search bar can match on note content. One request per scan per session; only while online.
+     */
+    private fun warmNotesCache() {
+        if (_connection.value !is ConnectionState.Connected) return
+        val pending = _allScans.value.filter {
+            it.notes.present && !it.localOnly && it.name !in notesTextCache
+        }
+        for (scan in pending) {
+            notesTextCache[scan.name] = "" // reserve so we don't refetch in flight
+            viewModelScope.launch {
+                client.getNotes(scan.name).onSuccess { json ->
+                    val text = flattenJsonText(json)
+                    if (text != notesTextCache[scan.name]) {
+                        notesTextCache[scan.name] = text
+                        mergeNotesText(scan.name, text)
+                    }
+                }
+            }
+        }
+    }
+
+    /** Patch one scan's searchable notes text into the current list and re-filter/sort. */
+    private fun mergeNotesText(name: String, text: String) {
+        _allScans.value = _allScans.value.map {
+            if (it.name == name) it.copy(notesText = text) else it
+        }
         recompute()
     }
 
@@ -191,6 +232,8 @@ class ScanLibraryViewModel(app: Application) : AndroidViewModel(app) {
             ScanSort.DATE_ASC -> compareBy<ScanInfo> { it.date }.thenBy { it.name }
             ScanSort.NAME_ASC -> compareBy(String.CASE_INSENSITIVE_ORDER) { it.name }
             ScanSort.NAME_DESC -> compareByDescending(String.CASE_INSENSITIVE_ORDER) { it.name }
+            ScanSort.PCD_DESC -> compareByDescending<ScanInfo> { it.pcd.sizeBytes }.thenBy { it.name }
+            ScanSort.BAG_DESC -> compareByDescending<ScanInfo> { it.bag.sizeBytes }.thenBy { it.name }
         }
         _scans.value = filtered.sortedWith(comparator)
     }
@@ -270,7 +313,13 @@ class ScanLibraryViewModel(app: Application) : AndroidViewModel(app) {
 
     suspend fun fetchConfig(name: String): Result<String> = client.getConfig(name)
     suspend fun fetchNotes(name: String): Result<JSONObject> = client.getNotes(name)
-    suspend fun saveNotes(name: String, notes: JSONObject): Result<Unit> = client.putNotes(name, notes)
+    suspend fun saveNotes(name: String, notes: JSONObject): Result<Unit> =
+        client.putNotes(name, notes).onSuccess {
+            // Keep the searchable notes text in sync with the just-saved form.
+            val text = flattenJsonText(notes)
+            notesTextCache[name] = text
+            mergeNotesText(name, text)
+        }
 
     // -----------------------------------------------------------------------
     // Settings
@@ -318,7 +367,9 @@ enum class ScanSort(val label: String) {
     DATE_DESC("Date (récent → ancien)"),
     DATE_ASC("Date (ancien → récent)"),
     NAME_ASC("Nom (A → Z)"),
-    NAME_DESC("Nom (Z → A)")
+    NAME_DESC("Nom (Z → A)"),
+    PCD_DESC("Taille PCD (lourd → léger)"),
+    BAG_DESC("Taille Bag (lourd → léger)")
 }
 
 /**
