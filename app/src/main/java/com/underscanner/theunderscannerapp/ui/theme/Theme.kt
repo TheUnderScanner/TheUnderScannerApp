@@ -1,4 +1,4 @@
-package com.example.theunderscannerapp.ui.theme
+package com.underscanner.theunderscannerapp.ui.theme
 
 import android.app.Activity
 import android.os.Build

@@ -1,4 +1,4 @@
-package com.example.theunderscannerapp
+package com.underscanner.theunderscannerapp
 
 import java.nio.ByteBuffer
 import java.nio.ByteOrder

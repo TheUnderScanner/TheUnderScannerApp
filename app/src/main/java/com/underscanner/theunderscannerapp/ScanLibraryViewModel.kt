@@ -1,0 +1,325 @@
+package com.underscanner.theunderscannerapp
+
+import android.app.Application
+import androidx.compose.runtime.State
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.snapshots.SnapshotStateMap
+import androidx.compose.runtime.mutableStateMapOf
+import androidx.lifecycle.AndroidViewModel
+import androidx.lifecycle.viewModelScope
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
+import org.json.JSONObject
+import java.io.File
+
+/**
+ * State holder for the single Scan Library screen.
+ *
+ * Responsibilities:
+ *  - poll `/status` to drive the connection indicator,
+ *  - hold one unified scan list (server list, falling back to an offline cache,
+ *    plus any scan whose `.pcd` exists locally but is absent from the server list),
+ *  - stream `.pcd` downloads with per-scan progress,
+ *  - proxy config and notes requests to the client.
+ *
+ * The Jetson is the source of truth for the *list*; the phone is the source of
+ * truth for *what it has downloaded* (a file existing in [LocalScanStorage]).
+ */
+class ScanLibraryViewModel(app: Application) : AndroidViewModel(app) {
+
+    private val settings = SettingsRepository(app)
+    val client = ScanApiClient(settings.baseUrl)
+
+    // --- Connection ---
+    private val _connection = mutableStateOf<ConnectionState>(ConnectionState.Connecting)
+    val connection: State<ConnectionState> = _connection
+
+    val baseUrl: String get() = settings.baseUrl
+
+    // --- Scan list ---
+    // [_allScans] is the merged source list (server/cache + local-only); [_scans] is what the
+    // UI shows after the current search filter + sort are applied.
+    private val _allScans = mutableStateOf<List<ScanInfo>>(emptyList())
+    private val _scans = mutableStateOf<List<ScanInfo>>(emptyList())
+    val scans: State<List<ScanInfo>> = _scans
+
+    // --- Search + sort (client-side, work offline on cached data) ---
+    private val _query = mutableStateOf("")
+    val query: State<String> = _query
+
+    private val _sort = mutableStateOf(
+        runCatching { ScanSort.valueOf(settings.scanSort) }.getOrDefault(ScanSort.DATE_DESC)
+    )
+    val sort: State<ScanSort> = _sort
+
+    private val _isRefreshing = mutableStateOf(false)
+    val isRefreshing: State<Boolean> = _isRefreshing
+
+    private val _listError = mutableStateOf<String?>(null)
+    val listError: State<String?> = _listError
+
+    /** Last scan list received from the server (null until a successful fetch / cache load). */
+    private var serverScans: List<ScanInfo>? = null
+    private var loadedFromServerOnce = false
+
+    // --- Downloads: scanName -> progress in [0,1], or -1 for indeterminate ---
+    val downloadProgress: SnapshotStateMap<String, Float> = mutableStateMapOf()
+    private val downloadJobs = mutableMapOf<String, Job>()
+
+    private var statusJob: Job? = null
+
+    init {
+        loadCache()
+        rebuildList()
+        refresh()
+    }
+
+    // -----------------------------------------------------------------------
+    // Connection polling
+    // -----------------------------------------------------------------------
+
+    fun startStatusPolling() {
+        if (statusJob?.isActive == true) return
+        statusJob = viewModelScope.launch {
+            while (isActive) {
+                pollStatusOnce()
+                delay(3000)
+            }
+        }
+    }
+
+    fun stopStatusPolling() {
+        statusJob?.cancel()
+        statusJob = null
+    }
+
+    private suspend fun pollStatusOnce() {
+        client.getStatus().fold(
+            onSuccess = { status ->
+                _connection.value = ConnectionState.Connected(status)
+                // First time we reach the server, pull the scan list automatically.
+                if (!loadedFromServerOnce) refreshSuspending()
+            },
+            onFailure = { e ->
+                _connection.value = ConnectionState.Offline(e.message ?: "Injoignable")
+            }
+        )
+    }
+
+    // -----------------------------------------------------------------------
+    // Scan list
+    // -----------------------------------------------------------------------
+
+    fun refresh() {
+        viewModelScope.launch { refreshSuspending() }
+    }
+
+    private suspend fun refreshSuspending() {
+        if (_isRefreshing.value) return
+        _isRefreshing.value = true
+        _listError.value = null
+        client.listScans().fold(
+            onSuccess = { (list, raw) ->
+                serverScans = list
+                loadedFromServerOnce = true
+                saveCache(raw)
+                rebuildList()
+            },
+            onFailure = { e ->
+                // Keep whatever we have (cache / local) and surface the error.
+                _listError.value = e.message ?: "Échec du chargement"
+                rebuildList()
+            }
+        )
+        _isRefreshing.value = false
+    }
+
+    /**
+     * Merge the server list (or cache) with locally-downloaded scans, flagging
+     * download state and appending any scan present only on this phone.
+     */
+    private fun rebuildList() {
+        val context = getApplication<Application>()
+        val base = serverScans ?: emptyList()
+        val known = base.map { scan ->
+            scan.copy(downloadedLocally = LocalScanStorage.isDownloaded(context, scan.name))
+        }
+        val knownNames = known.map { it.name }.toSet()
+
+        val localOnly = LocalScanStorage.downloadedScanNames(context)
+            .filter { it !in knownNames }
+            .map { localOnlyScan(context, it) }
+
+        _allScans.value = known + localOnly
+        recompute()
+    }
+
+    // -----------------------------------------------------------------------
+    // Search + sort (purely client-side; the displayed list is filtered then sorted)
+    // -----------------------------------------------------------------------
+
+    fun setQuery(q: String) {
+        _query.value = q
+        recompute()
+    }
+
+    fun setSort(s: ScanSort) {
+        _sort.value = s
+        settings.scanSort = s.name
+        recompute()
+    }
+
+    private fun recompute() {
+        val q = normalizeFuzzy(_query.value)
+        val filtered = if (q.isEmpty()) _allScans.value else _allScans.value.filter { scan ->
+            val haystack = listOf(scan.name, scan.location, scan.date, scan.notesText)
+                .joinToString(" ")
+            normalizeFuzzy(haystack).contains(q)
+        }
+        val comparator = when (_sort.value) {
+            ScanSort.DATE_DESC -> compareByDescending<ScanInfo> { it.date }.thenByDescending { it.name }
+            ScanSort.DATE_ASC -> compareBy<ScanInfo> { it.date }.thenBy { it.name }
+            ScanSort.NAME_ASC -> compareBy(String.CASE_INSENSITIVE_ORDER) { it.name }
+            ScanSort.NAME_DESC -> compareByDescending(String.CASE_INSENSITIVE_ORDER) { it.name }
+        }
+        _scans.value = filtered.sortedWith(comparator)
+    }
+
+    private fun localOnlyScan(context: android.content.Context, name: String): ScanInfo {
+        val file = LocalScanStorage.pcdFile(context, name)
+        // Best-effort split of "<date>_<location>_<run>".
+        val parts = name.split("_")
+        return ScanInfo(
+            name = name,
+            date = parts.getOrElse(0) { "" },
+            location = parts.getOrElse(1) { "" },
+            run = parts.getOrElse(2) { "" },
+            bag = ScanArtifact(present = false),
+            pcd = ScanArtifact(present = true, sizeBytes = file.length(), sizeHuman = humanSize(file.length())),
+            config = ScanArtifact(present = false),
+            notes = ScanArtifact(present = false),
+            downloadedLocally = true,
+            localOnly = true
+        )
+    }
+
+    // -----------------------------------------------------------------------
+    // Downloads
+    // -----------------------------------------------------------------------
+
+    fun downloadPcd(scan: ScanInfo, onError: (String) -> Unit) {
+        if (downloadJobs[scan.name]?.isActive == true) return
+        val context = getApplication<Application>()
+        val destination = LocalScanStorage.pcdFile(context, scan.name)
+        downloadProgress[scan.name] = -1f
+        val job = viewModelScope.launch {
+            client.downloadPcd(scan.name, destination) { p -> downloadProgress[scan.name] = p }
+                .fold(
+                    onSuccess = {
+                        downloadProgress.remove(scan.name)
+                        rebuildList()
+                    },
+                    onFailure = { e ->
+                        downloadProgress.remove(scan.name)
+                        if (e !is kotlinx.coroutines.CancellationException) {
+                            onError(e.message ?: "Échec du téléchargement")
+                        }
+                    }
+                )
+            downloadJobs.remove(scan.name)
+        }
+        downloadJobs[scan.name] = job
+    }
+
+    fun cancelDownload(scanName: String) {
+        downloadJobs[scanName]?.cancel()
+        downloadJobs.remove(scanName)
+        downloadProgress.remove(scanName)
+    }
+
+    fun isDownloading(scanName: String): Boolean = downloadProgress.containsKey(scanName)
+
+    /** Absolute local file for a downloaded scan, or null if not downloaded. */
+    fun localPcdFile(scanName: String): File? {
+        val f = LocalScanStorage.pcdFile(getApplication(), scanName)
+        return if (f.exists()) f else null
+    }
+
+    // -----------------------------------------------------------------------
+    // Config & notes (one-shot, called from the UI's coroutine scope)
+    // -----------------------------------------------------------------------
+
+    suspend fun fetchConfig(name: String): Result<String> = client.getConfig(name)
+    suspend fun fetchNotes(name: String): Result<JSONObject> = client.getNotes(name)
+    suspend fun saveNotes(name: String, notes: JSONObject): Result<Unit> = client.putNotes(name, notes)
+
+    // -----------------------------------------------------------------------
+    // Settings
+    // -----------------------------------------------------------------------
+
+    fun updateBaseUrl(url: String) {
+        settings.baseUrl = url
+        client.updateBaseUrl(settings.baseUrl)
+        // Force a fresh server fetch against the new address.
+        loadedFromServerOnce = false
+        _connection.value = ConnectionState.Connecting
+        refresh()
+    }
+
+    // -----------------------------------------------------------------------
+    // Offline cache (last /scans JSON written to a file)
+    // -----------------------------------------------------------------------
+
+    private fun loadCache() {
+        val cache = LocalScanStorage.scansCacheFile(getApplication())
+        if (!cache.exists()) return
+        runCatching {
+            val raw = cache.readText()
+            serverScans = parseCachedScans(raw)
+        }
+    }
+
+    private fun saveCache(raw: String) {
+        runCatching { LocalScanStorage.scansCacheFile(getApplication()).writeText(raw) }
+    }
+
+    private fun parseCachedScans(raw: String): List<ScanInfo> {
+        val arr = JSONObject(raw).optJSONArray("scans") ?: return emptyList()
+        return (0 until arr.length()).map { ScanInfo.from(arr.getJSONObject(it)) }
+    }
+
+    override fun onCleared() {
+        super.onCleared()
+        stopStatusPolling()
+    }
+}
+
+/** Scan-library sort orders. Default is [DATE_DESC] (newest first), the original behavior. */
+enum class ScanSort(val label: String) {
+    DATE_DESC("Date (récent → ancien)"),
+    DATE_ASC("Date (ancien → récent)"),
+    NAME_ASC("Nom (A → Z)"),
+    NAME_DESC("Nom (Z → A)")
+}
+
+/**
+ * Normalize a string for non-strict search: lowercase and drop separators so that `-`, `_`
+ * and spaces are interchangeable ("cave-x", "cave_x", "cave x" all become "cavex").
+ */
+private fun normalizeFuzzy(s: String): String =
+    s.lowercase().replace(Regex("[\\s_-]+"), "")
+
+/** Human-readable byte size, used for local-only scans built from a file length. */
+fun humanSize(bytes: Long): String {
+    val kb = 1024.0
+    val mb = kb * 1024
+    val gb = mb * 1024
+    return when {
+        bytes >= gb -> String.format("%.1f GiB", bytes / gb)
+        bytes >= mb -> String.format("%.1f MiB", bytes / mb)
+        bytes >= kb -> String.format("%.1f KiB", bytes / kb)
+        else -> "$bytes B"
+    }
+}

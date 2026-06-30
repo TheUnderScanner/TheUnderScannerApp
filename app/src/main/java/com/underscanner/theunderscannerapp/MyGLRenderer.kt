@@ -1,4 +1,4 @@
-package com.example.theunderscannerapp
+package com.underscanner.theunderscannerapp
 
 import android.content.Context
 import android.opengl.GLES20
@@ -17,7 +17,17 @@ import javax.microedition.khronos.egl.EGLConfig
 import javax.microedition.khronos.opengles.GL10
 import kotlin.math.*
 
-class MyGLRenderer(private val context: Context, private val fileName: String = "scan1.pcd") : GLSurfaceView.Renderer {
+// Camera mode enum
+enum class CameraMode {
+    ORBIT,
+    FPV
+}
+
+class MyGLRenderer(
+    private val context: Context,
+    private val fileName: String = "scan1.pcd",
+    private val liveMode: Boolean = false
+) : GLSurfaceView.Renderer {
 
     // Vertex buffer containing the point cloud vertices
     private lateinit var vertexBuffer: FloatBuffer
@@ -26,18 +36,53 @@ class MyGLRenderer(private val context: Context, private val fileName: String = 
     // Total number of points loaded from the PCD file
     private var pointCount: Int = 0
 
+    // ----------------------------
+    // Live preview (Phase 2)
+    // ----------------------------
+    // When set, points are drawn from this accumulating buffer instead of the file buffer.
+    @Volatile
+    var previewSource: PreviewCloud? = null
+    // Current sensor position (world frame) to draw as a marker, or null.
+    @Volatile
+    private var poseMarker: FloatArray? = null
+
+    fun setPoseMarker(x: Float, y: Float, z: Float) {
+        poseMarker = floatArrayOf(x, y, z)
+    }
+
+    // ----------------------------
+    // Camera Mode
+    // ----------------------------
+    private var _cameraMode: CameraMode = CameraMode.ORBIT
+    val cameraMode: CameraMode
+        get() = _cameraMode
 
     // ----------------------------
     // Orbit Camera Parameters
     // ----------------------------
 
     // The target point the camera is orbiting around
-    private val target = floatArrayOf(0f, 0f, 0f)
-    var yaw = 0f          // in degrees
-    var pitch = 20f       // in degrees
-    var distance = 20f    // distance from target
-    var orbitYaw = 0f
-    var orbitPitch = 0f
+    private val orbitTarget = floatArrayOf(0f, 0f, 0f)
+    private var orbitYaw = 0f          // in degrees
+    private var orbitPitch = 20f       // in degrees
+    private var orbitDistance = 20f    // distance from target
+
+    // ----------------------------
+    // FPV Camera Parameters
+    // ----------------------------
+
+    // Camera position in 3D space
+    private val fpvPosition = floatArrayOf(0f, 0f, 20f)
+    private var fpvYaw = 0f       // Looking direction (horizontal)
+    private var fpvPitch = 0f     // Looking direction (vertical)
+    private var fpvRoll = 0f      // Camera roll (for flight sim controls)
+
+    // ----------------------------
+    // Auto-Level Parameters
+    // ----------------------------
+    var autoLevelEnabled = false
+    private var targetOrbitPitch = orbitPitch
+    private val autoLevelLerpSpeed = 0.1f  // Smooth interpolation speed
 
     // ----------------------------
     // Matrices for rendering
@@ -65,14 +110,17 @@ class MyGLRenderer(private val context: Context, private val fileName: String = 
     // ----------------------------
 
     init {
-        // Parse the PCD file and create the vertex buffer
-        val parsed = parsePCD(context)
-
-        vertexBuffer = parsed.first // The float buffer containing 3D points
-        pointCount = parsed.second // The number of points parsed
-
-        // Log the loading result
-        Log.d("PCD", "Loaded $pointCount points from $fileName")
+        if (liveMode) {
+            // Live preview: no file. Points come from previewSource each frame.
+            vertexBuffer = ByteBuffer.allocateDirect(0).order(ByteOrder.nativeOrder()).asFloatBuffer()
+            pointCount = 0
+        } else {
+            // Parse the PCD file and create the vertex buffer
+            val parsed = parsePCD(context)
+            vertexBuffer = parsed.first // The float buffer containing 3D points
+            pointCount = parsed.second // The number of points parsed
+            Log.d("PCD", "Loaded $pointCount points from $fileName")
+        }
     }
 
     override fun onSurfaceCreated(gl: GL10?, config: EGLConfig?) {
@@ -115,22 +163,11 @@ class MyGLRenderer(private val context: Context, private val fileName: String = 
         // Use the compiled and linked shader program
         GLES20.glUseProgram(program)
 
-        // --- Update camera view (orbit camera logic) ---
-
-        // Convert yaw and pitch from degrees to radians
-        val yawRad = Math.toRadians(yaw.toDouble()).toFloat()
-        val pitchRad = Math.toRadians(pitch.toDouble()).toFloat()
-
-        // Calculate camera eye position in 3D space based on orbit parameters
-        val eyeX = target[0] + distance * cos(pitchRad) * sin(yawRad)
-        val eyeY = target[1] + distance * sin(pitchRad)
-        val eyeZ = target[2] + distance * cos(pitchRad) * cos(yawRad)
-
-        // Set up vector based on pitch to prevent camera flipping
-        val upY = if (cos(Math.toRadians(pitch.toDouble())) > 0) 1f else -1f
-
-        // Create the view matrix based on camera position and orientation
-        Matrix.setLookAtM(viewMatrix, 0, eyeX, eyeY, eyeZ, target[0], target[1], target[2], 0f, upY, 0f)
+        // --- Update camera view based on mode ---
+        when (_cameraMode) {
+            CameraMode.ORBIT -> updateOrbitCamera()
+            CameraMode.FPV -> updateFPVCamera()
+        }
 
         // --- Setup the perspective projection matrix ---
 
@@ -148,28 +185,119 @@ class MyGLRenderer(private val context: Context, private val fileName: String = 
         val mvpHandle = GLES20.glGetUniformLocation(program, "u_MVPMatrix")
         GLES20.glUniformMatrix4fv(mvpHandle, 1, false, mvpMatrix, 0)
 
-        // --- Render the point cloud ---
+        // --- Render the point cloud (file buffer, or the live preview when streaming) ---
+
+        val source = previewSource
+        val drawBuffer: FloatBuffer
+        val drawCount: Int
+        if (source != null) {
+            drawBuffer = source.buffer
+            drawCount = source.pointCount
+        } else {
+            drawBuffer = vertexBuffer
+            drawCount = pointCount
+        }
 
         val posHandle = GLES20.glGetAttribLocation(program, "a_Position")
+        val colorHandle = GLES20.glGetUniformLocation(program, "u_Color")
+        // Give points an explicit, visible color (the shader colors via u_Color).
+        GLES20.glUniform4f(colorHandle, 0.85f, 0.9f, 1f, 1f)
         GLES20.glEnableVertexAttribArray(posHandle)
-        GLES20.glVertexAttribPointer(posHandle, 3, GLES20.GL_FLOAT, false, 0, vertexBuffer)
-        GLES20.glDrawArrays(GLES20.GL_POINTS, 0, pointCount)
+        drawBuffer.position(0)
+        GLES20.glVertexAttribPointer(posHandle, 3, GLES20.GL_FLOAT, false, 0, drawBuffer)
+        GLES20.glDrawArrays(GLES20.GL_POINTS, 0, drawCount)
         GLES20.glDisableVertexAttribArray(posHandle)
 
-        // --- Draw the 3D axis circles at the target point ---
+        // --- Draw the 3D axis circles at the origin ---
+        if (_cameraMode == CameraMode.ORBIT) {
+            // Reset model matrix and move to target position
+            Matrix.setIdentityM(circleModelMatrix, 0)
+            Matrix.translateM(circleModelMatrix, 0, orbitTarget[0], orbitTarget[1], orbitTarget[2])
 
-        // Reset model matrix and move to target position
-        Matrix.setIdentityM(circleModelMatrix, 0)
-        Matrix.translateM(circleModelMatrix, 0, target[0], target[1], target[2])
-        //Matrix.scaleM(circleModelMatrix, 0, 0.1f, 0.1f, 0.1f)
+            // Draw the circles in red (XY plane), green (YZ plane), and blue (ZX plane)
+            drawCircle(circleXY, floatArrayOf(1f, 0f, 0f, 1f), circleModelMatrix) // XY - red
+            drawCircle(circleYZ, floatArrayOf(0f, 1f, 0f, 1f), circleModelMatrix) // YZ - green
+            drawCircle(circleZX, floatArrayOf(0f, 0f, 1f, 1f), circleModelMatrix) // ZX - blue
+        }
 
-        // Draw the circles in red (XY plane), green (YZ plane), and blue (ZX plane)
-        drawCircle(circleXY, floatArrayOf(1f, 0f, 0f, 1f), circleModelMatrix) // XY - red
-        drawCircle(circleYZ, floatArrayOf(0f, 1f, 0f, 1f), circleModelMatrix) // YZ - green
-        drawCircle(circleZX, floatArrayOf(0f, 0f, 1f, 1f), circleModelMatrix) // ZX - blue
+        // --- Live preview: mark the current sensor position with reference circles ---
+        poseMarker?.let { p ->
+            Matrix.setIdentityM(circleModelMatrix, 0)
+            Matrix.translateM(circleModelMatrix, 0, p[0], p[1], p[2])
+            drawCircle(circleXY, floatArrayOf(1f, 0.85f, 0f, 1f), circleModelMatrix) // amber
+            drawCircle(circleYZ, floatArrayOf(1f, 0.85f, 0f, 1f), circleModelMatrix)
+            drawCircle(circleZX, floatArrayOf(1f, 0.85f, 0f, 1f), circleModelMatrix)
+        }
+    }
 
+    // --- Camera Update Methods ---
 
+    private fun updateOrbitCamera() {
+        // Apply auto-level if enabled
+        if (autoLevelEnabled) {
+            // Smoothly interpolate pitch to horizontal (0 degrees)
+            targetOrbitPitch = 0f
+            val pitchDiff = targetOrbitPitch - orbitPitch
+            orbitPitch += pitchDiff * autoLevelLerpSpeed
+        }
 
+        // Convert yaw and pitch from degrees to radians
+        val yawRad = Math.toRadians(orbitYaw.toDouble()).toFloat()
+        val pitchRad = Math.toRadians(orbitPitch.toDouble()).toFloat()
+
+        // Calculate camera eye position in 3D space based on orbit parameters
+        val eyeX = orbitTarget[0] + orbitDistance * cos(pitchRad) * sin(yawRad)
+        val eyeY = orbitTarget[1] + orbitDistance * sin(pitchRad)
+        val eyeZ = orbitTarget[2] + orbitDistance * cos(pitchRad) * cos(yawRad)
+
+        // Set up vector to keep horizon level (always Y-up)
+        val upY = if (cos(pitchRad) > 0) 1f else -1f
+
+        // Create the view matrix based on camera position and orientation
+        Matrix.setLookAtM(viewMatrix, 0, eyeX, eyeY, eyeZ, orbitTarget[0], orbitTarget[1], orbitTarget[2], 0f, upY, 0f)
+    }
+
+    private fun updateFPVCamera() {
+        // Apply auto-level if enabled
+        if (autoLevelEnabled) {
+            // Smoothly interpolate pitch and roll to horizontal
+            val pitchDiff = 0f - fpvPitch
+            fpvPitch += pitchDiff * autoLevelLerpSpeed
+            val rollDiff = 0f - fpvRoll
+            fpvRoll += rollDiff * autoLevelLerpSpeed
+        }
+
+        // Convert angles from degrees to radians
+        val yawRad = Math.toRadians(fpvYaw.toDouble()).toFloat()
+        val pitchRad = Math.toRadians(fpvPitch.toDouble()).toFloat()
+        val rollRad = Math.toRadians(fpvRoll.toDouble()).toFloat()
+
+        // Calculate forward direction
+        val lookAtX = fpvPosition[0] + cos(pitchRad) * sin(yawRad)
+        val lookAtY = fpvPosition[1] + sin(pitchRad)
+        val lookAtZ = fpvPosition[2] + cos(pitchRad) * cos(yawRad)
+
+        // Calculate camera's up vector with roll
+        // First get the base up vector (perpendicular to look direction)
+        val baseUpX = -sin(pitchRad) * sin(yawRad)
+        val baseUpY = cos(pitchRad)
+        val baseUpZ = -sin(pitchRad) * cos(yawRad)
+
+        // Calculate right vector (perpendicular to forward and up)
+        val rightX = cos(yawRad)
+        val rightY = 0f
+        val rightZ = -sin(yawRad)
+
+        // Apply roll rotation around the forward vector
+        val upX = baseUpX * cos(rollRad) + rightX * sin(rollRad)
+        val upY = baseUpY * cos(rollRad) + rightY * sin(rollRad)
+        val upZ = baseUpZ * cos(rollRad) + rightZ * sin(rollRad)
+
+        // Create the view matrix for FPV camera
+        Matrix.setLookAtM(viewMatrix, 0,
+            fpvPosition[0], fpvPosition[1], fpvPosition[2],  // Eye position
+            lookAtX, lookAtY, lookAtZ,                        // Look at
+            upX, upY, upZ)                                    // Up vector with roll
     }
 
     private fun readShader(name: String): String {
@@ -186,17 +314,8 @@ class MyGLRenderer(private val context: Context, private val fileName: String = 
     }
 
     private fun parsePCD(context: Context): Pair<FloatBuffer, Int> {
-        // Get the directory where scans are stored
-        val scansDir = context.getExternalFilesDir("Scans") ?: context.filesDir
-        val file = File(scansDir, fileName)
-
-        // Check if the file exists, otherwise throw an error
-        if (!file.exists()) {
-            throw FileNotFoundException("File not found: ${file.absolutePath}")
-        }
-
-        // Read the PCD file header
-        val reader = BufferedReader(InputStreamReader(FileInputStream(file)))
+        // Read the PCD file header from the local scans directory
+        val reader = BufferedReader(InputStreamReader(openScanFile(context)))
         val headerLines = mutableListOf<String>()
         var line: String?
 
@@ -212,8 +331,9 @@ class MyGLRenderer(private val context: Context, private val fileName: String = 
         val pointCount = headerLines.firstOrNull { it.startsWith("POINTS") }
             ?.split(" ")?.getOrNull(1)?.toIntOrNull() ?: 0
 
-        // Reopen the file to read the binary point cloud data
-        val binaryStream = FileInputStream(file)
+        // Reopen to read the binary point cloud data
+        val binaryStream = openScanFile(context)
+
         // Skip the header portion to reach binary data
         val skip = headerLines.joinToString("\n").toByteArray().size + 1
         binaryStream.skip(skip.toLong())
@@ -246,59 +366,120 @@ class MyGLRenderer(private val context: Context, private val fileName: String = 
     }
 
 
-    // ====Public for touch updates=====
+    // ====Public Camera Control Methods=====
+
+    // Switch camera mode and synchronize camera positions
+    fun setCameraMode(mode: CameraMode) {
+        if (_cameraMode != mode) {
+            when (mode) {
+                CameraMode.FPV -> {
+                    // Switching to FPV: place FPV camera at current orbit camera position
+                    val yawRad = Math.toRadians(orbitYaw.toDouble()).toFloat()
+                    val pitchRad = Math.toRadians(orbitPitch.toDouble()).toFloat()
+
+                    // Calculate current orbit camera eye position
+                    fpvPosition[0] = orbitTarget[0] + orbitDistance * cos(pitchRad) * sin(yawRad)
+                    fpvPosition[1] = orbitTarget[1] + orbitDistance * sin(pitchRad)
+                    fpvPosition[2] = orbitTarget[2] + orbitDistance * cos(pitchRad) * cos(yawRad)
+
+                    // Set FPV orientation to look at the orbit target
+                    fpvYaw = orbitYaw
+                    fpvPitch = orbitPitch
+                }
+                CameraMode.ORBIT -> {
+                    // Switching to Orbit: center orbit on current FPV view direction
+                    // Calculate where the FPV camera is looking
+                    val yawRad = Math.toRadians(fpvYaw.toDouble()).toFloat()
+                    val pitchRad = Math.toRadians(fpvPitch.toDouble()).toFloat()
+
+                    // Set orbit target to a point in front of FPV camera
+                    val lookDistance = 10f
+                    orbitTarget[0] = fpvPosition[0] + lookDistance * cos(pitchRad) * sin(yawRad)
+                    orbitTarget[1] = fpvPosition[1] + lookDistance * sin(pitchRad)
+                    orbitTarget[2] = fpvPosition[2] + lookDistance * cos(pitchRad) * cos(yawRad)
+
+                    // Set orbit orientation
+                    orbitYaw = fpvYaw
+                    orbitPitch = fpvPitch
+                    orbitDistance = lookDistance
+                }
+            }
+            _cameraMode = mode
+        }
+    }
+
+    // --- Orbit Camera Controls ---
 
     // Rotate the orbit camera around the target based on user touch drag
     fun rotateOrbit(dYaw: Float, dPitch: Float) {
-        yaw -= dYaw
-        pitch += dPitch // *old* : pitch.coerceIn(-89f, 89f)
-        pitch %= 360f // Keep pitch within 0-360 degrees
+        orbitYaw += dYaw
+        orbitPitch -= dPitch
+        orbitPitch %= 360f // Keep pitch within 0-360 degrees
     }
 
     // Zoom the orbit camera in or out by adjusting the distance to the target
     fun zoomOrbitCamera(delta: Float) {
-        distance -= delta
-        distance = distance.coerceIn(1f, 100f) // Clamp zoom range
+        orbitDistance -= delta
+        orbitDistance = orbitDistance.coerceIn(1f, 100f) // Clamp zoom range
     }
 
     // Pan the orbit camera's target based on screen drag
     fun panOrbitTarget(dx: Float, dy: Float) {
         // Scale movement with distance
-        val panSpeed = distance * 0.001f
+        val panSpeed = orbitDistance * 0.001f
+        val yawRad = Math.toRadians(orbitYaw.toDouble()).toFloat()
         val right = floatArrayOf(
-            -Math.cos(Math.toRadians(orbitYaw.toDouble())).toFloat(),
-            Math.sin(Math.toRadians(orbitYaw.toDouble())).toFloat(),
+            -cos(yawRad),
+            sin(yawRad),
             0f
         )
         val up = floatArrayOf(0f, 0f, 1f) // Up vector in Z-axis
 
-        target[0] += right[0] * dx * panSpeed + up[0] * dy * panSpeed
-        target[1] += right[1] * dx * panSpeed + up[1] * dy * panSpeed
-        target[2] += right[2] * dx * panSpeed + up[2] * dy * panSpeed
+        orbitTarget[0] += right[0] * dx * panSpeed + up[0] * dy * panSpeed
+        orbitTarget[1] += right[1] * dx * panSpeed + up[1] * dy * panSpeed
+        orbitTarget[2] += right[2] * dx * panSpeed + up[2] * dy * panSpeed
     }
 
-    // *NOTE* :  not used
-    fun zoomOrbit(delta: Float) {
-        distance = (distance - delta).coerceIn(2f, 100f)
-    }
-    // *NOTE* :  not used
-    fun panOrbit(dx: Float, dy: Float) {
-        // Pan the target based on camera orientation
-        val yawRad = Math.toRadians(yaw.toDouble()).toFloat()
-        val right = floatArrayOf(sin(yawRad - PI.toFloat() / 2), 0f, cos(yawRad - PI.toFloat() / 2))
-        val up = floatArrayOf(0f, 1f, 1f)
+    // --- FPV Camera Controls ---
 
-        val scale = distance * 0.00001f
-        for (i in 0..2) {
-            target[i] += right[i] * dx * scale
-            target[i] += up[i] * dy * scale
-        }
+    // Rotate FPV camera view direction (flight simulator style - camera relative)
+    fun rotateFPV(dYaw: Float, dPitch: Float) {
+        // Apply yaw rotation around camera's current up vector (affected by pitch)
+        // In flight sim: yaw is relative to camera orientation, not world
+        fpvYaw += dYaw * cos(Math.toRadians(fpvPitch.toDouble())).toFloat()
+
+        // Apply pitch rotation
+        fpvPitch -= dPitch
+        fpvPitch = fpvPitch.coerceIn(-89f, 89f) // Prevent flipping
+
+        // In flight mode, yaw wraps around naturally
+        fpvYaw %= 360f
     }
-    // *NOTE* :  not used
-    fun rotateOrbitCamera(dx: Float, dy: Float) {
-        orbitYaw += dx * 0.5f
-        orbitPitch += dy * 0.5f
-        orbitPitch = orbitPitch.coerceIn(-89f, 89f)
+
+    // Move FPV camera position
+    fun moveFPV(forward: Float, right: Float, up: Float) {
+        val yawRad = Math.toRadians(fpvYaw.toDouble()).toFloat()
+        val pitchRad = Math.toRadians(fpvPitch.toDouble()).toFloat()
+
+        // Forward/backward movement (along viewing direction, but only XZ plane)
+        val forwardDir = floatArrayOf(
+            sin(yawRad),
+            0f,
+            cos(yawRad)
+        )
+
+        // Right/left movement (perpendicular to forward)
+        val rightDir = floatArrayOf(
+            cos(yawRad),
+            0f,
+            -sin(yawRad)
+        )
+
+        // Apply movement
+        val moveSpeed = 0.1f
+        fpvPosition[0] += (forwardDir[0] * forward + rightDir[0] * right) * moveSpeed
+        fpvPosition[1] += up * moveSpeed
+        fpvPosition[2] += (forwardDir[2] * forward + rightDir[2] * right) * moveSpeed
     }
 
 
@@ -339,6 +520,15 @@ class MyGLRenderer(private val context: Context, private val fileName: String = 
     // Getter to retrieve the number of points loaded from the point cloud file
     fun getPointCount(): Int {
         return pointCount
+    }
+
+    // Open the scan's .pcd from the shared local scans directory.
+    private fun openScanFile(context: Context): java.io.InputStream {
+        val file = File(LocalScanStorage.scansDir(context), fileName)
+        if (!file.exists()) {
+            throw FileNotFoundException("File not found: ${file.absolutePath}")
+        }
+        return FileInputStream(file)
     }
 
 }

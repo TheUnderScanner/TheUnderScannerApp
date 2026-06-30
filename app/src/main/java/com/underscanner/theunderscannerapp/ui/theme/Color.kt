@@ -1,4 +1,4 @@
-package com.example.theunderscannerapp.ui.theme
+package com.underscanner.theunderscannerapp.ui.theme
 
 import androidx.compose.ui.graphics.Color
 

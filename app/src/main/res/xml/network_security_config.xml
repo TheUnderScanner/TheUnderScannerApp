@@ -1,6 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <network-security-config>
-    <domain-config cleartextTrafficPermitted="true">
-        <domain includeSubdomains="true">10.244.178.232</domain> <!-- Jetson IP -->
-    </domain-config>
+    <!--
+      The Jetson is reached over plain HTTP on the WiFi hotspot, and its IP
+      changes between sessions (editable in the app's Settings). Allow cleartext
+      to any host for this development app.
+    -->
+    <base-config cleartextTrafficPermitted="true" />
 </network-security-config>

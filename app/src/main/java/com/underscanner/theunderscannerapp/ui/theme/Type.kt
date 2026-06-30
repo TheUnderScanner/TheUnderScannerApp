@@ -1,4 +1,4 @@
-package com.example.theunderscannerapp.ui.theme
+package com.underscanner.theunderscannerapp.ui.theme
 
 import androidx.compose.material3.Typography
 import androidx.compose.ui.text.TextStyle
