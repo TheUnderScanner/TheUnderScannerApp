@@ -2,6 +2,8 @@ package com.underscanner.theunderscannerapp
 
 import android.content.Context
 import android.opengl.GLSurfaceView
+import android.os.Handler
+import android.os.Looper
 import android.view.MotionEvent
 import android.view.ViewConfiguration
 import kotlin.math.abs
@@ -24,6 +26,8 @@ class MyGLSurfaceView(
 ) : GLSurfaceView(context) {
 
     val renderer: MyGLRenderer
+
+    private val mainHandler = Handler(Looper.getMainLooper())
 
     private val touchSlop = ViewConfiguration.get(context).scaledTouchSlop.toFloat()
     private val doubleTapTimeout = ViewConfiguration.getDoubleTapTimeout().toLong()
@@ -172,6 +176,14 @@ class MyGLSurfaceView(
 
     /** Switch between perspective (false) and orthographic (true) projection. */
     fun setOrthographic(on: Boolean) = queueEvent { renderer.setOrthographic(on) }
+
+    /**
+     * Observe graduation-scale changes (meters per ruler step). The renderer fires on the GL
+     * thread; the callback here is re-posted to the main thread so UI can consume it safely.
+     */
+    fun setOnScaleChanged(cb: ((Float) -> Unit)?) {
+        renderer.onScaleChanged = if (cb == null) null else { step -> mainHandler.post { cb(step) } }
+    }
 
     fun getPointCount(): Int = renderer.getPointCount()
 }

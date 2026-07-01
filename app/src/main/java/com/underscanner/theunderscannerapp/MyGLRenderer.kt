@@ -88,6 +88,12 @@ class MyGLRenderer(
     private var showHelpersAlways = false
     private val HELPER_FADE_MS = 700L // keep the ruler up briefly after motion stops
 
+    // Graduation-scale reporting: fire a callback (on the GL thread) whenever the ruler's
+    // step changes (1 m → 10 m → 100 m …), so the UI can flash the current scale.
+    @Volatile
+    var onScaleChanged: ((Float) -> Unit)? = null
+    private var lastReportedStep = -1f
+
     init {
         if (liveMode) {
             vertexBuffer = ByteBuffer.allocateDirect(0).order(ByteOrder.nativeOrder()).asFloatBuffer()
@@ -191,6 +197,14 @@ class MyGLRenderer(
         // Driven purely by detecting pivot motion, so any code that moves the pivot lights it up.
         if (pivotMoved()) pivotMovingUntilMs = now + HELPER_FADE_MS
         if (showHelpersAlways || now < pivotMovingUntilMs) drawRuler()
+
+        // --- Report graduation-scale changes (drives the top-left "échelle" flash). ---
+        val step = AxisRuler.stepFor(camera.camDist())
+        if (step != lastReportedStep) {
+            val firstFrame = lastReportedStep < 0f
+            lastReportedStep = step
+            if (!firstFrame) onScaleChanged?.invoke(step)
+        }
     }
 
     private fun pivotMoved(): Boolean {

@@ -34,9 +34,22 @@ fun PCDViewerScreen(
     var showPointCount by remember { mutableStateOf(true) }
     var pointCount by remember { mutableStateOf(0) }
 
+    // Graduation scale: flashed top-left each time it changes (1 m → 10 m → 100 m → 1 km …).
+    var scaleLabel by remember { mutableStateOf<String?>(null) }
+    var scaleVersion by remember { mutableStateOf(0) }
+    var showScale by remember { mutableStateOf(false) }
+
     LaunchedEffect(Unit) {
         delay(3000)
         showPointCount = false
+    }
+
+    // Restart on every scale change so rapid zooming keeps it visible, then fades out.
+    LaunchedEffect(scaleVersion) {
+        if (scaleVersion == 0) return@LaunchedEffect
+        showScale = true
+        delay(1500)
+        showScale = false
     }
 
     Scaffold(
@@ -60,6 +73,10 @@ fun PCDViewerScreen(
                 factory = { ctx ->
                     val view = MyGLSurfaceView(ctx, fileName)
                     pointCount = view.getPointCount()
+                    view.setOnScaleChanged { step ->
+                        scaleLabel = formatScale(step)
+                        scaleVersion++
+                    }
                     glView = view
                     view
                 },
@@ -86,6 +103,26 @@ fun PCDViewerScreen(
                 }
             }
 
+            AnimatedVisibility(
+                visible = showScale,
+                enter = fadeIn(),
+                exit = fadeOut(),
+                modifier = Modifier
+                    .align(Alignment.TopStart)
+                    .padding(start = 16.dp, top = 64.dp)
+            ) {
+                Surface(
+                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.7f),
+                    shape = RoundedCornerShape(8.dp)
+                ) {
+                    Text(
+                        scaleLabel ?: "",
+                        modifier = Modifier.padding(8.dp),
+                        style = MaterialTheme.typography.labelMedium
+                    )
+                }
+            }
+
             ViewerOptionsCluster(
                 helpersOn = helpersOn,
                 orthographic = orthographic,
@@ -98,4 +135,10 @@ fun PCDViewerScreen(
             )
         }
     }
+}
+
+/** Format a ruler step (meters) as a compact grid-scale label: "Échelle : 10 m" / "… 1 km". */
+private fun formatScale(step: Float): String {
+    val label = if (step >= 1000f) "${(step / 1000f).toInt()} km" else "${step.toInt()} m"
+    return "Échelle : $label"
 }
