@@ -12,7 +12,7 @@ import kotlin.math.sqrt
 /**
  * Hosts the GL renderer and translates touch into orbit-camera gestures:
  *
- *  - one-finger drag        → orbit (yaw/pitch)
+ *  - one-finger drag        → orbit (yaw/pitch), or pan the pivot when [panMode] is on
  *  - two-finger pinch       → dolly (distance), and two-finger drag → pan, simultaneously
  *  - double-tap-then-drag   → depth-resolved teleport (helper ray + sliding marker)
  *
@@ -52,6 +52,9 @@ class MyGLSurfaceView(
     private var lastTapY = 0f
     private var armedForZSlide = false
 
+    // When true, one-finger drag pans the pivot instead of orbiting (control-mode toggle).
+    private var panMode = false
+
     init {
         setEGLContextClientVersion(2)
         renderer = MyGLRenderer(context, fileName, liveMode)
@@ -84,13 +87,14 @@ class MyGLSurfaceView(
                     val x = event.getX(0); val y = event.getY(0)
                     if (abs(x - downX) > touchSlop || abs(y - downY) > touchSlop) moved = true
 
+                    val dx = x - previousX
                     val dy = y - previousY
-                    if (armedForZSlide) {
+                    when {
                         // Vertical drag slides the pivot along world Z, live.
-                        if (moved) queueEvent { renderer.zSlideMove(dy) }
-                    } else {
-                        val dx = x - previousX
-                        queueEvent { renderer.camOrbit(dx, dy) }
+                        armedForZSlide -> if (moved) queueEvent { renderer.zSlideMove(dy) }
+                        // Pan mode: one-finger drag translates the pivot (like a two-finger pan).
+                        panMode -> queueEvent { renderer.camPan(dx, dy) }
+                        else -> queueEvent { renderer.camOrbit(dx, dy) }
                     }
                     previousX = x; previousY = y
                 }
@@ -176,6 +180,9 @@ class MyGLSurfaceView(
 
     /** Switch between perspective (false) and orthographic (true) projection. */
     fun setOrthographic(on: Boolean) = queueEvent { renderer.setOrthographic(on) }
+
+    /** Control mode: false = one-finger drag orbits (default); true = one-finger drag pans the pivot. */
+    fun setPanMode(on: Boolean) { panMode = on }
 
     /**
      * Observe graduation-scale changes (meters per ruler step). The renderer fires on the GL

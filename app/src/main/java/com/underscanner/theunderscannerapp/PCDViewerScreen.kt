@@ -5,6 +5,9 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Autorenew
+import androidx.compose.material.icons.filled.OpenWith
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -32,6 +35,8 @@ fun PCDViewerScreen(
 
     var helpersOn by remember { mutableStateOf(settings.viewerHelpers) }
     var orthographic by remember { mutableStateOf(settings.viewerOrthographic) }
+    // Camera control mode: false = one-finger drag orbits, true = one-finger drag pans the pivot.
+    var panMode by remember { mutableStateOf(false) }
 
     var showPointCount by remember { mutableStateOf(true) }
     var pointCount by remember { mutableStateOf(0) }
@@ -66,6 +71,7 @@ fun PCDViewerScreen(
                 // Apply the persisted viewer toggles to the fresh GL view.
                 view.setHelpersAlways(helpersOn)
                 view.setOrthographic(orthographic)
+                view.setPanMode(panMode)
                 glView = view
                 view
             },
@@ -112,6 +118,26 @@ fun PCDViewerScreen(
                     style = MaterialTheme.typography.labelMedium
                 )
             }
+        }
+
+        // Camera control-mode toggle (orbit ⇄ pan the pivot), sub-button sized, bottom-left.
+        SmallFloatingActionButton(
+            onClick = {
+                panMode = !panMode
+                glView?.setPanMode(panMode)
+            },
+            containerColor = if (panMode) MaterialTheme.colorScheme.primary
+            else MaterialTheme.colorScheme.secondaryContainer,
+            contentColor = if (panMode) MaterialTheme.colorScheme.onPrimary
+            else MaterialTheme.colorScheme.onSecondaryContainer,
+            modifier = Modifier
+                .align(Alignment.BottomStart)
+                .padding(24.dp)
+        ) {
+            Icon(
+                if (panMode) Icons.Default.OpenWith else Icons.Default.Autorenew,
+                contentDescription = if (panMode) "Mode déplacement (pan)" else "Mode orbite"
+            )
         }
 
         ViewerOptionsCluster(

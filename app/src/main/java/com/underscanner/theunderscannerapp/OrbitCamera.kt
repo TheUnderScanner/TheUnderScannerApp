@@ -165,12 +165,12 @@ class OrbitCamera {
         pivot[2] += rz * mx + hz * mf
     }
 
-    /** Slide the pivot along the world-up axis. Fingers up (dyPx < 0) raises it. */
+    /** Slide the pivot along the world-up axis. Fingers down (dyPx > 0) raises it. */
     fun moveVertical(dyPx: Float, viewportH: Int) {
         cancelAnim()
         val worldPerPx = (2f * camDist() * tan(Math.toRadians(fovY / 2.0)).toFloat()) /
             viewportH.coerceAtLeast(1)
-        val amt = -dyPx * worldPerPx
+        val amt = dyPx * worldPerPx
         pivot[0] += worldUp[0] * amt
         pivot[1] += worldUp[1] * amt
         pivot[2] += worldUp[2] * amt

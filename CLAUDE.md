@@ -184,7 +184,10 @@ JSON pose `{type:"pose", x, y, z, ...}` (~10 Hz).
   into separate cameras.
 - **Gestures** (all 1:1, no smoothing; handled in `MyGLSurfaceView`, forwarded to the renderer
   via `queueEvent` so camera mutation stays on the GL thread):
-  - one-finger drag → **orbit** (yaw wraps; pitch clamps ±89°);
+  - one-finger drag → **orbit** (yaw wraps; pitch clamps ±89°) — unless the viewer's **control-mode
+    toggle** (`MyGLSurfaceView.setPanMode`) is in pan mode, in which case one-finger drag **pans the
+    pivot** instead (same behavior as a two-finger pan). The toggle is a bottom-left sub-button in
+    `PCDViewerScreen` (orbit icon ⇄ move icon), session-only (not persisted);
   - two-finger pinch → **dolly** (physical move along the view axis, not FOV; clamped at
     `OrbitCamera.MIN_DISTANCE` so it stops just short of the pivot and never flips the view);
   - two-finger drag → **pan**: left/right slides along the camera's screen-right; up/down **walks
