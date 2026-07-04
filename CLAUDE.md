@@ -126,9 +126,12 @@ JSON pose `{type:"pose", x, y, z, ...}` (~10 Hz).
 
 - **SettingsScreen.kt** — edit/normalize the Jetson base URL; shows live connection state.
 
-- **PCDViewerScreen.kt** — the 3D viewer wrapper: a back action and the **viewer options
-  cluster** (`ViewerControls.kt`). The camera is gesture-only (see the OpenGL viewer section);
-  there is no camera-style / control-mode / auto-level menu.
+- **PCDViewerScreen.kt** — the 3D viewer wrapper: **no top bar** (the GL surface is
+  full-screen; Android's back gesture handles leaving), just the **viewer options cluster**
+  (`ViewerControls.kt`). The camera is gesture-only (see the OpenGL viewer section); there is
+  no camera-style / control-mode / auto-level menu. The **Repères** and **Projection** toggle
+  states are read from / written to `SettingsRepository` (`viewerHelpers`,
+  `viewerOrthographic`), so they persist across viewer sessions and app restarts.
 
 - **ViewerControls.kt** — `ViewerOptionsCluster`: an icon-only access FAB toggling a panel of
   child actions (pressing any child auto-collapses it). Children: **Tout afficher** (frame-all),
@@ -182,7 +185,8 @@ JSON pose `{type:"pose", x, y, z, ...}` (~10 Hz).
 - **Gestures** (all 1:1, no smoothing; handled in `MyGLSurfaceView`, forwarded to the renderer
   via `queueEvent` so camera mutation stays on the GL thread):
   - one-finger drag → **orbit** (yaw wraps; pitch clamps ±89°);
-  - two-finger pinch → **dolly** (through-pivot, ~1000:1 range, physical move not FOV);
+  - two-finger pinch → **dolly** (physical move along the view axis, not FOV; clamped at
+    `OrbitCamera.MIN_DISTANCE` so it stops just short of the pivot and never flips the view);
   - two-finger drag → **pan**: left/right slides along the camera's screen-right; up/down **walks
     the pivot along the cave floor** (view direction projected onto the ground plane — fingers
     down = forward), so tilt never drives you into the floor;

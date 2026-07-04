@@ -39,6 +39,20 @@ class SettingsRepository(context: Context) {
             prefs.edit().putString(KEY_SCAN_SORT, value).apply()
         }
 
+    /** Viewer: whether the axis-ruler helper lines are forced always-on (persisted across sessions). */
+    var viewerHelpers: Boolean
+        get() = prefs.getBoolean(KEY_VIEWER_HELPERS, false)
+        set(value) {
+            prefs.edit().putBoolean(KEY_VIEWER_HELPERS, value).apply()
+        }
+
+    /** Viewer: orthographic (true) vs perspective (false) projection (persisted across sessions). */
+    var viewerOrthographic: Boolean
+        get() = prefs.getBoolean(KEY_VIEWER_ORTHO, false)
+        set(value) {
+            prefs.edit().putBoolean(KEY_VIEWER_ORTHO, value).apply()
+        }
+
     companion object {
         // The Jetson's current hotspot IP. Editable in Settings.
         const val DEFAULT_BASE_URL = "http://10.75.93.211:8000"
@@ -47,6 +61,8 @@ class SettingsRepository(context: Context) {
         private const val KEY_LAST_LOCATION = "last_location"
         private const val KEY_SSH_USER = "ssh_user"
         private const val KEY_SCAN_SORT = "scan_sort"
+        private const val KEY_VIEWER_HELPERS = "viewer_helpers"
+        private const val KEY_VIEWER_ORTHO = "viewer_ortho"
 
         /**
          * Normalize user input into a usable base URL: ensure a scheme, drop any

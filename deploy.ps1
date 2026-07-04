@@ -1,5 +1,5 @@
 # Deploy script for TheUnderScanner app
-# This script builds, uninstalls old version, and installs new version on connected device
+# This script builds and reinstalls the app on the connected device, keeping its data
 
 Write-Host "======================================" -ForegroundColor Cyan
 Write-Host "TheUnderScanner - Deploy Script" -ForegroundColor Cyan
@@ -38,19 +38,19 @@ if ($LASTEXITCODE -ne 0) {
 Write-Host "Build successful!" -ForegroundColor Green
 Write-Host ""
 
-# Uninstall old version
-Write-Host "Uninstalling old version..." -ForegroundColor Yellow
-& $ADB uninstall $PACKAGE 2>$null
-Write-Host "Old version uninstalled (if it existed)." -ForegroundColor Green
-Write-Host ""
-
-# Install new version
-Write-Host "Installing new version..." -ForegroundColor Yellow
+# Install new version (reinstall in place, keeping app data)
+Write-Host "Reinstalling app (keeping data)..." -ForegroundColor Yellow
 $APK_PATH = ".\app\build\outputs\apk\debug\app-debug.apk"
-& $ADB install $APK_PATH
+& $ADB install -r $APK_PATH
 if ($LASTEXITCODE -ne 0) {
-    Write-Host "ERROR: Installation failed!" -ForegroundColor Red
-    exit 1
+    Write-Host "WARNING: In-place reinstall failed (often a signature mismatch)." -ForegroundColor Yellow
+    Write-Host "Retrying with a clean uninstall (data will be lost)..." -ForegroundColor Yellow
+    & $ADB uninstall $PACKAGE 2>$null
+    & $ADB install $APK_PATH
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "ERROR: Installation failed!" -ForegroundColor Red
+        exit 1
+    }
 }
 Write-Host ""
 Write-Host "======================================" -ForegroundColor Cyan

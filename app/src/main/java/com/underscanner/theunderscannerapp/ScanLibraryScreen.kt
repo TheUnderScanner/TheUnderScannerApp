@@ -300,15 +300,7 @@ private fun ScanRow(
                         )
                     }
                 }
-                if (scan.downloadedLocally) {
-                    AssistChip(
-                        onClick = onOpen,
-                        label = { Text("Téléchargé") },
-                        leadingIcon = {
-                            Icon(Icons.Default.CheckCircle, null, Modifier.size(18.dp))
-                        }
-                    )
-                } else if (scan.localOnly) {
+                if (scan.localOnly) {
                     AssistChip(onClick = {}, label = { Text("Local") })
                 }
             }

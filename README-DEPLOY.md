@@ -12,8 +12,7 @@ That's it! The script will automatically:
 1. ✅ Set up Java 17 environment
 2. ✅ Check for connected devices
 3. ✅ Build the APK
-4. ✅ Uninstall old version
-5. ✅ Install new version
+4. ✅ Reinstall in place, keeping app data (falls back to a clean install if signatures mismatch)
 
 ## Prerequisites
 
@@ -59,6 +58,6 @@ adb install .\app\build\outputs\apk\debug\app-debug.apk
 
 ## Files Created
 
-- `deploy.ps1` - Main deployment script (build + uninstall + install)
+- `deploy.ps1` - Main deployment script (build + reinstall in place, keeping data)
 - `build-with-java17.ps1` - Build-only script with Java 17
 - `gradle.properties` - Contains `org.gradle.java.home` setting for Java 17

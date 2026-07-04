@@ -47,9 +47,11 @@ class OrbitCamera {
     companion object {
         const val MIN_PITCH = -89f
         const val MAX_PITCH = 89f
-        // Floor used for distance-adaptive speeds so motion never stalls near the pivot
-        // (also lets a dolly cross the pivot to the far side instead of clamping at 0).
+        // Floor used for distance-adaptive speeds so motion never stalls near the pivot.
         const val MIN_SCALE = 0.05f
+        // Closest the eye may dolly toward the pivot: a hard stop kept > 0 so the camera
+        // never reaches / crosses the pivot (which would flip the view and the controls).
+        const val MIN_DISTANCE = 0.1f
         const val DOLLY_SENS = 0.005f
         const val ORBIT_DEG_PER_PX = 0.3f
     }
@@ -122,10 +124,10 @@ class OrbitCamera {
         pitchDeg = (pitchDeg + dyPx * ORBIT_DEG_PER_PX).coerceIn(MIN_PITCH, MAX_PITCH)
     }
 
-    /** [spreadDeltaPx] > 0 (fingers spreading) zooms in (decreases distance). Crosses the pivot freely. */
+    /** [spreadDeltaPx] > 0 (fingers spreading) zooms in (decreases distance). Clamped at [MIN_DISTANCE] so it stops just short of the pivot. */
     fun dolly(spreadDeltaPx: Float) {
         cancelAnim()
-        distance -= spreadDeltaPx * camDist() * DOLLY_SENS
+        distance = (distance - spreadDeltaPx * camDist() * DOLLY_SENS).coerceAtLeast(MIN_DISTANCE)
     }
 
     /**

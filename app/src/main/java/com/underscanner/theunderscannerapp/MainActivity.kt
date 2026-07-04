@@ -77,7 +77,7 @@ fun AppNavHost() {
             arguments = listOf(navArgument("fileName") { type = NavType.StringType })
         ) { backStackEntry ->
             val fileName = backStackEntry.arguments?.getString("fileName") ?: ""
-            PCDViewerScreen(fileName = fileName, onBack = { navController.popBackStack() })
+            PCDViewerScreen(fileName = fileName)
         }
 
         composable("controlRoom") {
