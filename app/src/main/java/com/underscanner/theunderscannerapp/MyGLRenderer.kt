@@ -55,6 +55,12 @@ class MyGLRenderer(
     // ----------------------------
     val camera = OrbitCamera()
 
+    // Automatic "show" orbit: continuous yaw spin around the pivot when enabled.
+    @Volatile
+    private var autoOrbitOn = false
+    @Volatile
+    private var autoOrbitDegPerSec = 0f
+
     // Scene bounds for frame-all (file mode computed once at load).
     private var hasBounds = false
     private val boundsMin = floatArrayOf(0f, 0f, 0f)
@@ -146,6 +152,7 @@ class MyGLRenderer(
             pendingInitialFit = false
         }
         camera.update(dt)
+        if (autoOrbitOn) camera.autoOrbit(autoOrbitDegPerSec, dt)
 
         GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT or GLES20.GL_DEPTH_BUFFER_BIT)
         GLES20.glUseProgram(program)
@@ -240,6 +247,12 @@ class MyGLRenderer(
     fun setHelpersAlways(on: Boolean) { showHelpersAlways = on }
 
     fun setOrthographic(on: Boolean) { camera.orthographic = on }
+
+    /** Enable/disable the automatic "show" orbit (continuous yaw spin around the pivot). */
+    fun setAutoOrbit(on: Boolean) { autoOrbitOn = on }
+
+    /** Set the automatic orbit speed in degrees per second (sign = direction). */
+    fun setAutoOrbitSpeed(degPerSec: Float) { autoOrbitDegPerSec = degPerSec }
 
     private fun drawRuler() {
         val count = AxisRuler.build(rulerBuffer, camera.pivot, camera.camDist())

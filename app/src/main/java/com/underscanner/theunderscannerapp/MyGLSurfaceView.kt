@@ -184,6 +184,12 @@ class MyGLSurfaceView(
     /** Control mode: false = one-finger drag orbits (default); true = one-finger drag pans the pivot. */
     fun setPanMode(on: Boolean) { panMode = on }
 
+    /** Enable/disable the automatic "show" orbit (continuous spin around the pivot). */
+    fun setAutoOrbit(on: Boolean) = renderer.setAutoOrbit(on)
+
+    /** Automatic orbit speed in degrees per second. */
+    fun setAutoOrbitSpeed(degPerSec: Float) = renderer.setAutoOrbitSpeed(degPerSec)
+
     /**
      * Observe graduation-scale changes (meters per ruler step). The renderer fires on the GL
      * thread; the callback here is re-posted to the main thread so UI can consume it safely.

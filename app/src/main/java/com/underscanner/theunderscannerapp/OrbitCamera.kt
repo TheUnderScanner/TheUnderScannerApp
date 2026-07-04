@@ -124,6 +124,18 @@ class OrbitCamera {
         pitchDeg = (pitchDeg + dyPx * ORBIT_DEG_PER_PX).coerceIn(MIN_PITCH, MAX_PITCH)
     }
 
+    /**
+     * Automatic "show" orbit: advance the yaw by [degPerSec] over [dtMs] milliseconds,
+     * spinning the camera around the pivot without touching pitch/distance. Unlike direct
+     * manipulation this does NOT cancel an in-flight frame-all animation, so the two can
+     * compose (the cloud keeps spinning while it flies to frame).
+     */
+    fun autoOrbit(degPerSec: Float, dtMs: Float) {
+        if (degPerSec == 0f) return
+        yawDeg -= degPerSec * dtMs / 1000f
+        if (yawDeg >= 360f || yawDeg <= -360f) yawDeg %= 360f
+    }
+
     /** [spreadDeltaPx] > 0 (fingers spreading) zooms in (decreases distance). Clamped at [MIN_DISTANCE] so it stops just short of the pivot. */
     fun dolly(spreadDeltaPx: Float) {
         cancelAnim()

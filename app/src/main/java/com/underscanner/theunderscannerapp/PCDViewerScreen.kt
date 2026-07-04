@@ -38,6 +38,10 @@ fun PCDViewerScreen(
     // Camera control mode: false = one-finger drag orbits, true = one-finger drag pans the pivot.
     var panMode by remember { mutableStateOf(false) }
 
+    // Automatic "show" orbit: on/off + speed as a 0..1 fraction (mapped to deg/s). Session-only.
+    var autoOrbitOn by remember { mutableStateOf(false) }
+    var autoOrbitSpeed by remember { mutableStateOf(0.35f) }
+
     var showPointCount by remember { mutableStateOf(true) }
     var pointCount by remember { mutableStateOf(0) }
 
@@ -72,6 +76,8 @@ fun PCDViewerScreen(
                 view.setHelpersAlways(helpersOn)
                 view.setOrthographic(orthographic)
                 view.setPanMode(panMode)
+                view.setAutoOrbitSpeed(autoOrbitDegPerSec(autoOrbitSpeed))
+                view.setAutoOrbit(autoOrbitOn)
                 glView = view
                 view
             },
@@ -154,12 +160,34 @@ fun PCDViewerScreen(
                 settings.viewerOrthographic = orthographic
                 glView?.setOrthographic(orthographic)
             },
+            autoOrbitOn = autoOrbitOn,
+            autoOrbitSpeed = autoOrbitSpeed,
+            onToggleAutoOrbit = {
+                autoOrbitOn = !autoOrbitOn
+                glView?.setAutoOrbit(autoOrbitOn)
+            },
+            onAutoOrbitSpeedChange = { fraction ->
+                autoOrbitSpeed = fraction
+                glView?.setAutoOrbitSpeed(autoOrbitDegPerSec(fraction))
+                // Adjusting the speed also arms the orbit so the spin is previewed live.
+                if (!autoOrbitOn) {
+                    autoOrbitOn = true
+                    glView?.setAutoOrbit(true)
+                }
+            },
             modifier = Modifier
                 .align(Alignment.BottomEnd)
                 .padding(24.dp)
         )
     }
 }
+
+/**
+ * Map an auto-orbit speed fraction (0..1 from the slider) to degrees per second. The floor keeps
+ * even the slowest setting visibly moving; the ceiling stays comfortable for a "show" spin.
+ */
+private fun autoOrbitDegPerSec(fraction: Float): Float =
+    5f + fraction.coerceIn(0f, 1f) * 115f
 
 /** Format a ruler step (meters) as a compact grid-scale label: "Échelle : 10 m" / "… 1 km". */
 private fun formatScale(step: Float): String {
