@@ -81,7 +81,7 @@ fun ViewerOptionsCluster(
 
     Column(
         modifier = modifier,
-        horizontalAlignment = Alignment.End,
+        horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
         AnimatedVisibility(
@@ -90,9 +90,18 @@ fun ViewerOptionsCluster(
             exit = fadeOut() + shrinkVertically()
         ) {
             Column(
-                horizontalAlignment = Alignment.End,
+                horizontalAlignment = Alignment.CenterHorizontally,
                 verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
+                // Auto-orbit is the topmost sub-button.
+                if (onToggleAutoOrbit != null) {
+                    AutoOrbitFab(
+                        active = autoOrbitOn,
+                        speed = autoOrbitSpeed,
+                        onToggle = onToggleAutoOrbit,
+                        onSpeedChange = { onAutoOrbitSpeedChange?.invoke(it) }
+                    )
+                }
                 OptionFab(Icons.Default.CenterFocusStrong, "Tout afficher") {
                     onFrameAll(); expanded = false
                 }
@@ -104,14 +113,6 @@ fun ViewerOptionsCluster(
                     "Projection", active = orthographic
                 ) {
                     onToggleProjection(); expanded = false
-                }
-                if (onToggleAutoOrbit != null) {
-                    AutoOrbitFab(
-                        active = autoOrbitOn,
-                        speed = autoOrbitSpeed,
-                        onToggle = onToggleAutoOrbit,
-                        onSpeedChange = { onAutoOrbitSpeedChange?.invoke(it) }
-                    )
                 }
             }
         }
