@@ -134,6 +134,26 @@ class ScanApiClient(initialBaseUrl: String) {
         }
     }
 
+    /**
+     * GET /scans/{name}/trajectory — download the `UTR1` LiDAR path sidecar to [destination].
+     * The path is small (a downsampled polyline), so it's fetched in one shot. Fails (404) when
+     * the scan has no trajectory — callers treat that as "no path", not an error.
+     */
+    suspend fun downloadTrajectory(name: String, destination: File): Result<Unit> =
+        withContext(Dispatchers.IO) {
+            runCatching {
+                val request = Request.Builder().url("$baseUrl/scans/$name/trajectory").get().build()
+                client.newCall(request).execute().use { response ->
+                    if (!response.isSuccessful) throw IOException("HTTP ${response.code}")
+                    val body = response.body ?: throw IOException("Empty response body")
+                    body.byteStream().use { input ->
+                        FileOutputStream(destination).use { output -> input.copyTo(output) }
+                    }
+                    Unit
+                }
+            }
+        }
+
     private fun parseScans(raw: String): List<ScanInfo> {
         val arr: JSONArray = JSONObject(raw).optJSONArray("scans") ?: JSONArray()
         return (0 until arr.length()).map { ScanInfo.from(arr.getJSONObject(it)) }

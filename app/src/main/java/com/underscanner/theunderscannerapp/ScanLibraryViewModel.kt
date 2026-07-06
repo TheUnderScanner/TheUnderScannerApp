@@ -278,6 +278,10 @@ class ScanLibraryViewModel(app: Application) : AndroidViewModel(app) {
             }
                 .fold(
                     onSuccess = {
+                        // Best-effort: grab the sidecar trajectory next to the pcd (ignore 404).
+                        client.downloadTrajectory(
+                            scan.name, LocalScanStorage.trajFile(context, scan.name)
+                        )
                         downloadProgress.remove(scan.name)
                         rebuildList()
                     },

@@ -190,6 +190,21 @@ class MyGLSurfaceView(
     /** Automatic orbit speed in degrees per second. */
     fun setAutoOrbitSpeed(degPerSec: Float) = renderer.setAutoOrbitSpeed(degPerSec)
 
+    /** Point-cloud coloring mode (uniform / intensity / height / distance / tag). */
+    fun setColorMode(mode: ColorMode) = queueEvent { renderer.setColorMode(mode) }
+
+    /** Intensity-mode reflectivity window, low/high normalized to [0,1]. */
+    fun setReflBounds(low: Float, high: Float) = queueEvent { renderer.setReflBounds(low, high) }
+
+    /** Livox tag-based noise filter level (off / conservative / aggressive). */
+    fun setNoiseFilter(level: NoiseFilter) = queueEvent { renderer.setNoiseFilter(level) }
+
+    /** Show/hide the LiDAR path polyline. */
+    fun setShowTrajectory(on: Boolean) = queueEvent { renderer.setShowTrajectory(on) }
+
+    /** Whether a path (live or loaded from a saved scan's .traj) is available to draw. */
+    fun hasTrajectory(): Boolean = renderer.hasTrajectory()
+
     /**
      * Observe graduation-scale changes (meters per ruler step). The renderer fires on the GL
      * thread; the callback here is re-posted to the main thread so UI can consume it safely.

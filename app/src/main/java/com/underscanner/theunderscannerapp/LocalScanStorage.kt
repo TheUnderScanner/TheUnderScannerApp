@@ -23,6 +23,10 @@ object LocalScanStorage {
     fun pcdFile(context: Context, scanName: String): File =
         File(scansDir(context), "$scanName.pcd")
 
+    /** Local sidecar file a scan's LiDAR path (`.traj`) is (or would be) stored at. */
+    fun trajFile(context: Context, scanName: String): File =
+        File(scansDir(context), "$scanName.traj")
+
     /** Whether the scan's `.pcd` has been downloaded to this phone. */
     fun isDownloaded(context: Context, scanName: String): Boolean =
         pcdFile(context, scanName).let { it.exists() && it.length() > 0 }

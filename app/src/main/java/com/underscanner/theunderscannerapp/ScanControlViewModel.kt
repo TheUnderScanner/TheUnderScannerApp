@@ -51,6 +51,9 @@ class ScanControlViewModel(app: Application) : AndroidViewModel(app) {
     // --- Live preview ---
     val previewCloud = PreviewCloud()
 
+    /** LiDAR path accumulated from the pose stream; drawn as the trajectory polyline. */
+    val trajectory = Trajectory()
+
     private val _link = mutableStateOf(PreviewLinkState.Idle)
     val link: State<PreviewLinkState> = _link
 
@@ -183,6 +186,7 @@ class ScanControlViewModel(app: Application) : AndroidViewModel(app) {
                 onSuccess = { result ->
                     if (loc.isNotBlank()) settings.lastLocation = loc
                     previewCloud.clear()
+                    trajectory.clear()
                     _pose.value = null
                     _scanName.value = result.scan
                     _elapsed.value = 0
@@ -244,7 +248,10 @@ class ScanControlViewModel(app: Application) : AndroidViewModel(app) {
         val manager = PreviewStreamManager(
             client = client,
             cloud = previewCloud,
-            onPose = { x, y, z -> _pose.value = floatArrayOf(x, y, z) },
+            onPose = { x, y, z ->
+                _pose.value = floatArrayOf(x, y, z)
+                trajectory.append(x, y, z)
+            },
             onState = { _link.value = it },
             onFrame = { lastFrameAt = System.currentTimeMillis() },
             isRunning = { _scanStatus.value?.running ?: true }
@@ -298,6 +305,7 @@ class ScanControlViewModel(app: Application) : AndroidViewModel(app) {
         _scanName.value = null
         _message.value = null
         previewCloud.clear()
+        trajectory.clear()
         _pose.value = null
         _previewPoints.value = 0
     }

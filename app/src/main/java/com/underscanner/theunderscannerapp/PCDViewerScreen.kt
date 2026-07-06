@@ -42,6 +42,19 @@ fun PCDViewerScreen(
     var autoOrbitOn by remember { mutableStateOf(false) }
     var autoOrbitSpeed by remember { mutableStateOf(0.35f) }
 
+    // Coloring: mode + intensity reflectivity window + tag noise filter. Persisted across sessions.
+    var colorMode by remember {
+        mutableStateOf(runCatching { ColorMode.valueOf(settings.viewerColorMode) }.getOrDefault(ColorMode.UNIFORM))
+    }
+    var reflLow by remember { mutableStateOf(settings.viewerReflLow) }
+    var reflHigh by remember { mutableStateOf(settings.viewerReflHigh) }
+    var noiseFilter by remember {
+        mutableStateOf(runCatching { NoiseFilter.valueOf(settings.viewerNoiseFilter) }.getOrDefault(NoiseFilter.OFF))
+    }
+    // Trajectory: shown by default when the scan has a downloaded .traj sidecar.
+    var hasTrajectory by remember { mutableStateOf(false) }
+    var showTrajectory by remember { mutableStateOf(true) }
+
     var showPointCount by remember { mutableStateOf(true) }
     var pointCount by remember { mutableStateOf(0) }
 
@@ -78,6 +91,11 @@ fun PCDViewerScreen(
                 view.setPanMode(panMode)
                 view.setAutoOrbitSpeed(autoOrbitDegPerSec(autoOrbitSpeed))
                 view.setAutoOrbit(autoOrbitOn)
+                view.setColorMode(colorMode)
+                view.setReflBounds(reflLow, reflHigh)
+                view.setNoiseFilter(noiseFilter)
+                hasTrajectory = view.hasTrajectory()
+                view.setShowTrajectory(showTrajectory)
                 glView = view
                 view
             },
@@ -126,8 +144,9 @@ fun PCDViewerScreen(
             }
         }
 
-        // Camera control-mode toggle (orbit ⇄ pan the pivot), sub-button sized, bottom-left.
-        SmallFloatingActionButton(
+        // Camera control-mode toggle (orbit ⇄ pan the pivot), bottom-left. Same size as the
+        // bottom-right options access FAB.
+        FloatingActionButton(
             onClick = {
                 panMode = !panMode
                 glView?.setPanMode(panMode)
@@ -146,39 +165,73 @@ fun PCDViewerScreen(
             )
         }
 
-        ViewerOptionsCluster(
-            helpersOn = helpersOn,
-            orthographic = orthographic,
-            onFrameAll = { glView?.frameAll() },
-            onToggleHelpers = {
-                helpersOn = !helpersOn
-                settings.viewerHelpers = helpersOn
-                glView?.setHelpersAlways(helpersOn)
-            },
-            onToggleProjection = {
-                orthographic = !orthographic
-                settings.viewerOrthographic = orthographic
-                glView?.setOrthographic(orthographic)
-            },
-            autoOrbitOn = autoOrbitOn,
-            autoOrbitSpeed = autoOrbitSpeed,
-            onToggleAutoOrbit = {
-                autoOrbitOn = !autoOrbitOn
-                glView?.setAutoOrbit(autoOrbitOn)
-            },
-            onAutoOrbitSpeedChange = { fraction ->
-                autoOrbitSpeed = fraction
-                glView?.setAutoOrbitSpeed(autoOrbitDegPerSec(fraction))
-                // Adjusting the speed also arms the orbit so the spin is previewed live.
-                if (!autoOrbitOn) {
-                    autoOrbitOn = true
-                    glView?.setAutoOrbit(true)
-                }
-            },
+        Row(
+            verticalAlignment = Alignment.Bottom,
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
             modifier = Modifier
                 .align(Alignment.BottomEnd)
                 .padding(24.dp)
-        )
+        ) {
+            ColorModeCluster(
+                mode = colorMode,
+                reflLow = reflLow,
+                reflHigh = reflHigh,
+                onModeChange = {
+                    colorMode = it
+                    settings.viewerColorMode = it.name
+                    glView?.setColorMode(it)
+                },
+                onReflBoundsChange = { lo, hi ->
+                    reflLow = lo; reflHigh = hi
+                    settings.viewerReflLow = lo
+                    settings.viewerReflHigh = hi
+                    glView?.setReflBounds(lo, hi)
+                }
+            )
+            ViewerOptionsCluster(
+                helpersOn = helpersOn,
+                orthographic = orthographic,
+                onFrameAll = { glView?.frameAll() },
+                onToggleHelpers = {
+                    helpersOn = !helpersOn
+                    settings.viewerHelpers = helpersOn
+                    glView?.setHelpersAlways(helpersOn)
+                },
+                onToggleProjection = {
+                    orthographic = !orthographic
+                    settings.viewerOrthographic = orthographic
+                    glView?.setOrthographic(orthographic)
+                },
+                autoOrbitOn = autoOrbitOn,
+                autoOrbitSpeed = autoOrbitSpeed,
+                onToggleAutoOrbit = {
+                    autoOrbitOn = !autoOrbitOn
+                    glView?.setAutoOrbit(autoOrbitOn)
+                },
+                onAutoOrbitSpeedChange = { fraction ->
+                    autoOrbitSpeed = fraction
+                    glView?.setAutoOrbitSpeed(autoOrbitDegPerSec(fraction))
+                    // Adjusting the speed also arms the orbit so the spin is previewed live.
+                    if (!autoOrbitOn) {
+                        autoOrbitOn = true
+                        glView?.setAutoOrbit(true)
+                    }
+                },
+                noiseFilter = noiseFilter,
+                onNoiseFilterChange = {
+                    noiseFilter = it
+                    settings.viewerNoiseFilter = it.name
+                    glView?.setNoiseFilter(it)
+                },
+                showTrajectory = showTrajectory,
+                onToggleTrajectory = if (hasTrajectory) {
+                    {
+                        showTrajectory = !showTrajectory
+                        glView?.setShowTrajectory(showTrajectory)
+                    }
+                } else null
+            )
+        }
     }
 }
 

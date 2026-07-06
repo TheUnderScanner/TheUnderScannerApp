@@ -95,20 +95,41 @@ class PreviewStreamManager(
         }
     }
 
-    /** Binary frame: little-endian uint32 N, then N×(x,y,z,intensity) float32. */
+    /**
+     * `USC1` binary frame (little-endian): an 8-byte header — magic `"USC1"` then uint32
+     * point_count — followed by point_count 16-byte records:
+     * `x,y,z` float32 (offsets 0/4/8) then reflectivity, tag, line, reserved uint8 (12..15).
+     *
+     * The magic doubles as a version tag: a frame that doesn't start with it is ignored.
+     */
     private fun decodeFrame(bytes: ByteString) {
         val arr = bytes.toByteArray()
-        if (arr.size < 4) return
+        if (arr.size < HEADER_SIZE) return
+        if (arr[0] != 'U'.code.toByte() || arr[1] != 'S'.code.toByte() ||
+            arr[2] != 'C'.code.toByte() || arr[3] != '1'.code.toByte()
+        ) {
+            // Unknown/legacy frame — don't crash, just skip it.
+            android.util.Log.w("PreviewStream", "Dropping frame with bad magic")
+            return
+        }
         val bb = ByteBuffer.wrap(arr).order(ByteOrder.LITTLE_ENDIAN)
+        bb.position(4)
         val n = bb.int
         if (n <= 0) return
-        // Guard against truncated frames: 4 floats (16 bytes) per point follow the count.
-        val available = (arr.size - 4) / 16
+        // Guard against truncated frames: RECORD_SIZE bytes per point follow the header.
+        val available = (arr.size - HEADER_SIZE) / RECORD_SIZE
         val count = if (n <= available) n else available
         if (count <= 0) return
-        val floats = FloatArray(count * 4)
-        for (i in floats.indices) floats[i] = bb.float
-        cloud.addFrame(floats, count)
+        // bb is positioned at the first record; PreviewCloud reads records directly (zero copy
+        // into its interleaved backing buffer, dedup preserved).
+        cloud.addFrame(bb, count)
+    }
+
+    companion object {
+        /** `USC1` header: 4-byte magic + uint32 point_count. */
+        private const val HEADER_SIZE = 8
+        /** Per-point record: xyz (3× float32) + 4 attribute bytes. */
+        private const val RECORD_SIZE = 16
     }
 
     private fun decodePose(text: String) {

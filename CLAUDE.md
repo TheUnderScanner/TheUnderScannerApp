@@ -68,6 +68,7 @@ Settings (the hotspot-assigned IP changes between sessions); default is in
 | GET | `/status` | Readiness heartbeat | `{status, hostname, time, data_root, version}` |
 | GET | `/scans` | List all scans + metadata | `{scans: [ScanInfo]}` (newest first) |
 | GET | `/scans/{name}/pcd` | Download point cloud | binary `application/octet-stream` |
+| GET | `/scans/{name}/trajectory` | Download LiDAR path (`UTR1`) | binary `application/octet-stream`; **404** if none |
 | GET | `/scans/{name}/config` | Read config (read-only) | `text/plain` (YAML) |
 | GET | `/scans/{name}/notes` | Read notes form | JSON object (`{}` if none) |
 | PUT | `/scans/{name}/notes` | Save notes form | `{ok: true}` |
@@ -83,9 +84,25 @@ Settings (the hotspot-assigned IP changes between sessions); default is in
 list endpoint typically reports only note *presence*, the ViewModel also fetches each scan's notes
 once from `/scans/{name}/notes` and merges the text into the searchable list (cached per session).
 
-**WebSocket `ws://<jetson>/ws/preview`:** binary message = one frame: little-endian `uint32`
-N then `N×(x,y,z,intensity)` float32 (16 bytes/point, world frame, accumulate). Text message =
-JSON pose `{type:"pose", x, y, z, ...}` (~10 Hz).
+**WebSocket `ws://<jetson>/ws/preview`:** binary message = one `USC1` frame (little-endian):
+an 8-byte header — 4-byte ASCII magic `"USC1"` (version tag; a frame that doesn't start with
+it is dropped) + `uint32` point_count — then point_count **16-byte interleaved records**:
+`x,y,z` float32 (offsets 0/4/8) then `reflectivity, tag, line, reserved` uint8 (offsets 12–15).
+World frame, accumulate. The 16-byte stride is 4-aligned so the 4 trailing bytes bind directly
+as a normalized `GL_UNSIGNED_BYTE` vec4 attribute (zero-copy). `tag` is bit-packed Livox noise
+info (bits 1-0 spatial, bits 3-2 return-intensity; 0/1/2/3 = normal/high/medium/low-confidence
+noise) and is often all-zero with the current FAST-LIO (harmless). Text message = JSON pose
+`{type:"pose", x, y, z, ...}` (~10 Hz). `GET /preview/format` also returns this layout as JSON
+(not consumed by the app; the binary layout above is authoritative).
+
+**Trajectory `UTR1` (LiDAR path):** the backend records `/Odometry` positions (min-step dedup)
+while a scan runs, writes `trajectories/{name}.traj` on stop, and serves it at
+`/scans/{name}/trajectory` (a running scan's in-progress path is served from memory if the file
+doesn't exist yet; `/scans` reports `trajectory.present`). Format is little-endian: 8-byte header
+(4-byte magic `"UTR1"` + `uint32` count) then count × `x,y,z` float32 (12 B each). Live, the app
+builds the same path itself from the pose stream (no fetch needed); for a saved scan the `.traj`
+is downloaded next to the `.pcd` (`ScanApiClient.downloadTrajectory`, best-effort) and both are
+drawn as a yellow polyline (`Trajectory.kt` + `MyGLRenderer.drawTrajectory`, `GL_LINE_STRIP`).
 
 ### Key Components
 
@@ -133,11 +150,25 @@ JSON pose `{type:"pose", x, y, z, ...}` (~10 Hz).
   states are read from / written to `SettingsRepository` (`viewerHelpers`,
   `viewerOrthographic`), so they persist across viewer sessions and app restarts.
 
-- **ViewerControls.kt** — `ViewerOptionsCluster`: an icon-only access FAB toggling a panel of
-  child actions (pressing any child auto-collapses it). Children: **Tout afficher** (frame-all),
-  **Repères** (axis-ruler always-on toggle), **Projection** (perspective ⇄ orthographic toggle);
-  toggles are tinted when active. Caller owns the toggle state and pushes it to the GL view.
-  Reused by both `PCDViewerScreen` and `ActiveScanScreen`. New future view options go here.
+- **ViewerControls.kt** — two clusters, both reused by `PCDViewerScreen` and `ActiveScanScreen`,
+  laid out as a bottom-right `Row` (`ColorModeCluster` left of `ViewerOptionsCluster`):
+  - `ViewerOptionsCluster`: an icon-only access FAB toggling a panel of child actions (pressing a
+    plain child auto-collapses it). Children top→bottom: optional **auto-orbit** (tap-toggle +
+    long-press speed slider), **Filtre bruit** (`NoiseFilterFab`: 3-stop tag noise filter — tap
+    cycles Off/Conservateur/Agressif, long-press reveals a 3-detent vertical slider), **Tout
+    afficher** (frame-all), **Repères** (axis-ruler always-on), **Projection** (perspective ⇄
+    orthographic), and **Trajectoire** (yellow LiDAR-path polyline; shown only when a path is
+    available — always in live, and in the Library viewer only if the scan's `.traj` was
+    downloaded). Toggles tinted when active.
+  - `ColorModeCluster`: the coloring selector. Its expanded column is **persistent** (a mode tap
+    does not collapse it — the user closes it explicitly). Modes: **Uniforme / Intensité / Hauteur
+    (Z) / Distance (au capteur) / Tag**; the active mode's FAB is tinted. Intensity carries a
+    double-thumb `RangeSlider` (left of its FAB) bounding the reflectivity window — points outside
+    clamp to the extreme colormap colors. Coloring/filter mapping happens in the shader from the
+    packed per-point attributes, so switching modes is a uniform change (no buffer rebuild).
+  - Caller owns all state and pushes it to the GL view. In the Library viewer the color mode +
+    reflectivity window + noise filter persist via `SettingsRepository`; in Active Scan they are
+    session-only. New future view options go here.
 
 #### Phase 2 — scan control + live preview
 - **ScanControlViewModel.kt** (`AndroidViewModel`) — polls `/status` + `/scan/status`,
@@ -159,21 +190,32 @@ JSON pose `{type:"pose", x, y, z, ...}` (~10 Hz).
   live point counter / "receiving" indicator run on a **separate UI ticker** tied to
   `attachPreview`/`detachPreview`, decoupled from network polling, so they track the accumulating
   `PreviewCloud` directly.
-- **PreviewCloud.kt** — accumulates streamed frames into one pre-allocated direct
-  `FloatBuffer` with voxel dedup (0.1 m) and a point cap, so a long scan stays renderable.
-  Producer appends with absolute puts; the GL thread reads `[0, pointCount)` lock-free.
-- **PreviewStreamManager.kt** — owns the `/ws/preview` WebSocket: decodes little-endian
-  binary frames off the main thread, applies pose, and auto-reconnects with backoff while
-  `/scan/status` says a scan is running.
+- **PreviewCloud.kt** — accumulates streamed frames into one pre-allocated direct `ByteBuffer`
+  of **16-byte interleaved records** (xyz float + reflectivity/tag/line/reserved bytes — the
+  `USC1` layout), with voxel dedup (0.1 m) and a point cap, so a long scan stays renderable.
+  Producer appends with absolute puts (carrying all four attribute bytes through the dedup) and
+  tracks running world bounds; the GL thread reads `[0, pointCount)` lock-free via a float view
+  (positions) + the byte buffer (attributes).
+- **PreviewStreamManager.kt** — owns the `/ws/preview` WebSocket: validates the `USC1` magic and
+  decodes frames off the main thread (handing the record block straight to `PreviewCloud`),
+  applies pose, and auto-reconnects with backoff while `/scan/status` says a scan is running.
 - The **same renderer** draws the preview: `MyGLRenderer`/`MyGLSurfaceView` have a `liveMode`
-  that reads `previewSource: PreviewCloud` each frame and draws a pose marker; the orbit
-  camera is shared with the file viewer.
+  that reads `previewSource: PreviewCloud` each frame and draws a pose marker (also fed to the
+  distance-mode `u_Sensor`); the orbit camera and the coloring pipeline are shared with the file
+  viewer.
 
 #### OpenGL viewer + orbit camera
 - **MyGLSurfaceView.kt / MyGLRenderer.kt** — OpenGL ES 2.0 point-cloud renderer (depth-tested
-  `GL_POINTS`). The PCD parser reads a binary `.pcd` (8 floats/point; renders x,y,z) from
-  `LocalScanStorage` and computes the cloud's bounding box for Frame-All. The vertex/draw
-  pipeline is unchanged from the original; only the camera was rebuilt.
+  `GL_POINTS`). Both the saved-file buffer and the live `PreviewCloud` are **interleaved 16-byte
+  records** drawn zero-copy: `a_Position` = 3 floats at offset 0, `a_Attribs` = 4 normalized
+  `GL_UNSIGNED_BYTE` at offset 12, stride 16. The PCD parser reads a binary `.pcd` (8 floats/pt;
+  the 4th float = Livox intensity → the reflectivity byte, tag/line = 0) and computes the cloud's
+  bounding box for Frame-All. **Coloring** (`ColorMode` uniform `u_ColorMode`) and the **tag noise
+  filter** (`u_NoiseFilter`, discard in the fragment shader) are done entirely in the shaders from
+  the packed attributes — mode/threshold changes are uniform updates, never a buffer rebuild. The
+  intensity colormap is a hard-coded turbo approximation with a reflectivity low/high window
+  (`u_ReflBounds`); height/distance normalize against the cloud bounds / sensor pose. Marker
+  circles and the axis ruler force `u_ColorMode=0`/`u_NoiseFilter=0` so overlays stay solid-color.
 - **OrbitCamera.kt** — the single-state camera (the camera rebuild). State is one coherent set:
   `pivot`, `distance`, `yawDeg`, `pitchDeg` (no roll). Eye = `pivot + distance·dir` where `dir`
   is **Z-up spherical** (yaw around +Z, pitch = elevation; singularity only at ±90°, guarded by
@@ -241,8 +283,12 @@ the Jetson; re-entering reconnects; a dropped socket auto-reconnects with backof
 - **Camera FPV mode** (Phase 2 of the camera rebuild): `OrbitCamera` is architected for it
   ("distance → ~0, pivot glued to camera") — add it on top of the existing state, don't fork
   a second camera. No roll.
-- Use the streamed `intensity` (4th float) for per-point coloring (shader currently uses a
-  single uniform color; intensity is parsed but ignored).
+- Per-point coloring (intensity/height/tag) + the tag noise filter + the LiDAR-path trajectory
+  polyline are **done** (see the OpenGL viewer / trajectory sections). Possible follow-ups: a
+  calibrated (distance-normalized) intensity; a correct **distance-to-sensor** color mode (the
+  enum/shader branch exist but the button is hidden — it currently renders as a gradient around
+  the pivot, which is wrong); and persisting `tag` into the saved `.pcd` (the saved file carries
+  reflectivity but not tag/line).
 - When the preview hits its point cap it stops adding new voxels — consider coarsening or
   dropping oldest instead.
 - An offline notes-edit queue (editing currently requires a connection).

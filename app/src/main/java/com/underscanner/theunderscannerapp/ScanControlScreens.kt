@@ -288,6 +288,14 @@ fun ActiveScanScreen(
     var glView by remember { mutableStateOf<MyGLSurfaceView?>(null) }
     var helpersOn by remember { mutableStateOf(false) }
     var orthographic by remember { mutableStateOf(false) }
+    // Coloring state — session-only for the live view (not persisted).
+    var colorMode by remember { mutableStateOf(ColorMode.UNIFORM) }
+    var reflLow by remember { mutableStateOf(0f) }
+    var reflHigh by remember { mutableStateOf(1f) }
+    var noiseFilter by remember { mutableStateOf(NoiseFilter.OFF) }
+    var showTrajectory by remember { mutableStateOf(true) } // path builds as the scan runs
+    // Camera control mode: false = one-finger drag orbits, true = one-finger drag pans the pivot.
+    var panMode by remember { mutableStateOf(false) }
 
     DisposableEffect(Unit) {
         viewModel.startPolling()
@@ -308,6 +316,12 @@ fun ActiveScanScreen(
             factory = { ctx ->
                 MyGLSurfaceView(ctx, liveMode = true).also { view ->
                     view.renderer.previewSource = viewModel.previewCloud
+                    view.renderer.trajectorySource = viewModel.trajectory
+                    view.setColorMode(colorMode)
+                    view.setReflBounds(reflLow, reflHigh)
+                    view.setNoiseFilter(noiseFilter)
+                    view.setShowTrajectory(showTrajectory)
+                    view.setPanMode(panMode)
                     glView = view
                 }
             },
@@ -349,26 +363,66 @@ fun ActiveScanScreen(
             }
         }
 
-        // Viewer options (frame-all, ruler, projection) — same cluster as the saved-PCD viewer.
-        ViewerOptionsCluster(
-            helpersOn = helpersOn,
-            orthographic = orthographic,
-            onFrameAll = { glView?.frameAll() },
-            onToggleHelpers = { helpersOn = !helpersOn; glView?.setHelpersAlways(helpersOn) },
-            onToggleProjection = { orthographic = !orthographic; glView?.setOrthographic(orthographic) },
+        // Coloring selector + viewer options — same clusters as the saved-PCD viewer.
+        // (Distance mode uses the live sensor pose already fed to the renderer's marker.)
+        Row(
+            verticalAlignment = Alignment.Bottom,
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+            modifier = Modifier
+                .align(Alignment.BottomEnd)
+                .padding(24.dp)
+        ) {
+            ColorModeCluster(
+                mode = colorMode,
+                reflLow = reflLow,
+                reflHigh = reflHigh,
+                onModeChange = { colorMode = it; glView?.setColorMode(it) },
+                onReflBoundsChange = { lo, hi ->
+                    reflLow = lo; reflHigh = hi; glView?.setReflBounds(lo, hi)
+                }
+            )
+            ViewerOptionsCluster(
+                helpersOn = helpersOn,
+                orthographic = orthographic,
+                onFrameAll = { glView?.frameAll() },
+                onToggleHelpers = { helpersOn = !helpersOn; glView?.setHelpersAlways(helpersOn) },
+                onToggleProjection = { orthographic = !orthographic; glView?.setOrthographic(orthographic) },
+                noiseFilter = noiseFilter,
+                onNoiseFilterChange = { noiseFilter = it; glView?.setNoiseFilter(it) },
+                showTrajectory = showTrajectory,
+                onToggleTrajectory = {
+                    showTrajectory = !showTrajectory
+                    glView?.setShowTrajectory(showTrajectory)
+                }
+            )
+        }
+
+        // Camera control-mode toggle (orbit ⇄ pan the pivot), bottom-left — same as the PCD viewer.
+        FloatingActionButton(
+            onClick = { panMode = !panMode; glView?.setPanMode(panMode) },
+            containerColor = if (panMode) MaterialTheme.colorScheme.primary
+            else MaterialTheme.colorScheme.secondaryContainer,
+            contentColor = if (panMode) MaterialTheme.colorScheme.onPrimary
+            else MaterialTheme.colorScheme.onSecondaryContainer,
             modifier = Modifier
                 .align(Alignment.BottomStart)
                 .padding(24.dp)
-        )
+        ) {
+            Icon(
+                if (panMode) Icons.Default.OpenWith else Icons.Default.Autorenew,
+                contentDescription = if (panMode) "Mode déplacement (pan)" else "Mode orbite"
+            )
+        }
 
-        // Stop & Save
+        // Stop & Save — top-right, clear of the status bar.
         Button(
             onClick = { viewModel.stopScan() },
             enabled = phase == ControlPhase.Active,
             colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error),
             modifier = Modifier
-                .align(Alignment.BottomCenter)
-                .padding(24.dp)
+                .align(Alignment.TopEnd)
+                .statusBarsPadding()
+                .padding(12.dp)
                 .height(56.dp)
         ) {
             if (phase == ControlPhase.Stopping) {

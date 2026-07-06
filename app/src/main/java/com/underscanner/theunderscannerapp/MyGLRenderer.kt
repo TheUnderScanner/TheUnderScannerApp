@@ -32,16 +32,35 @@ class MyGLRenderer(
     private val liveMode: Boolean = false
 ) : GLSurfaceView.Renderer {
 
-    // Vertex buffer containing the point cloud vertices (file mode)
-    private lateinit var vertexBuffer: FloatBuffer
+    // Interleaved 16-byte-per-point vertex data (file mode): xyz float32 + reflectivity/tag/
+    // line/reserved bytes — same layout as PreviewCloud, so the draw path is identical for
+    // saved files and the live preview. [vertexPosView] is a float view over the same memory
+    // used for the position attribute; [vertexByteBuffer] serves the packed byte attributes.
+    private lateinit var vertexByteBuffer: ByteBuffer
+    private lateinit var vertexPosView: FloatBuffer
     private var program = 0
     private var pointCount: Int = 0
+
+    // ----------------------------
+    // Coloring / filtering state (set from the UI via MyGLSurfaceView.queueEvent)
+    // ----------------------------
+    @Volatile private var colorMode = ColorMode.UNIFORM
+    @Volatile private var reflLow = 0f   // intensity mode lower bound, normalized [0,1]
+    @Volatile private var reflHigh = 1f  // intensity mode upper bound, normalized [0,1]
+    @Volatile private var noiseFilter = NoiseFilter.OFF
 
     // ----------------------------
     // Live preview (Phase 2)
     // ----------------------------
     @Volatile
     var previewSource: PreviewCloud? = null
+
+    // LiDAR path polyline (live-accumulated, or loaded from a saved scan's .traj sidecar).
+    @Volatile
+    var trajectorySource: Trajectory? = null
+
+    @Volatile
+    private var showTrajectory = false
 
     @Volatile
     private var poseMarker: FloatArray? = null
@@ -102,18 +121,26 @@ class MyGLRenderer(
 
     init {
         if (liveMode) {
-            vertexBuffer = ByteBuffer.allocateDirect(0).order(ByteOrder.nativeOrder()).asFloatBuffer()
+            vertexByteBuffer = ByteBuffer.allocateDirect(0).order(ByteOrder.nativeOrder())
+            vertexPosView = vertexByteBuffer.asFloatBuffer()
             pointCount = 0
             camera.distance = 12f
         } else {
             val parsed = parsePCD(context)
-            vertexBuffer = parsed.first
+            vertexByteBuffer = parsed.first
+            vertexPosView = vertexByteBuffer.asFloatBuffer()
             pointCount = parsed.second
             Log.d("PCD", "Loaded $pointCount points from $fileName")
             if (hasBounds) {
                 applyBoundsToCamera()
                 pendingInitialFit = true // fit once the surface (aspect) is known
             }
+            // Load the sidecar trajectory (.traj) for this scan, if it was downloaded.
+            val trajFile = File(
+                LocalScanStorage.scansDir(context),
+                fileName.removeSuffix(".pcd") + ".traj"
+            )
+            Trajectory().takeIf { it.loadFile(trajFile) > 0 }?.let { trajectorySource = it }
         }
     }
 
@@ -169,30 +196,56 @@ class MyGLRenderer(
         GLES20.glUniformMatrix4fv(mvpHandle, 1, false, mvpMatrix, 0)
 
         // --- Render the point cloud (file buffer, or the live preview when streaming) ---
+        // Both sources are interleaved 16-byte records: position = 3 floats at offset 0,
+        // packed attributes = 4 normalized bytes at offset 12, stride 16 (zero-copy).
         val source = previewSource
-        val drawBuffer: FloatBuffer
+        val posBuf: FloatBuffer
+        val attrBuf: ByteBuffer
         val drawCount: Int
         if (source != null) {
-            drawBuffer = source.buffer
+            posBuf = source.floatBuffer
+            attrBuf = source.byteBuffer
             drawCount = source.pointCount
         } else {
-            drawBuffer = vertexBuffer
+            posBuf = vertexPosView
+            attrBuf = vertexByteBuffer
             drawCount = pointCount
         }
 
+        // Coloring / filtering uniforms (mapping happens in the shader from the packed attribs).
+        GLES20.glUniform1i(GLES20.glGetUniformLocation(program, "u_ColorMode"), colorMode.ordinal)
+        GLES20.glUniform1i(GLES20.glGetUniformLocation(program, "u_NoiseFilter"), noiseFilter.ordinal)
+        GLES20.glUniform4f(GLES20.glGetUniformLocation(program, "u_Color"), 0.85f, 0.9f, 1f, 1f)
+        GLES20.glUniform2f(GLES20.glGetUniformLocation(program, "u_ReflBounds"), reflLow, reflHigh)
+        val sensor = poseMarker ?: boundsCenter(source)
+        GLES20.glUniform3f(GLES20.glGetUniformLocation(program, "u_Sensor"), sensor[0], sensor[1], sensor[2])
+        val hr = heightRange(source)
+        GLES20.glUniform2f(GLES20.glGetUniformLocation(program, "u_HeightRange"), hr[0], hr[1])
+        GLES20.glUniform1f(GLES20.glGetUniformLocation(program, "u_DistScale"), distScale(source))
+
         val posHandle = GLES20.glGetAttribLocation(program, "a_Position")
-        val colorHandle = GLES20.glGetUniformLocation(program, "u_Color")
-        GLES20.glUniform4f(colorHandle, 0.85f, 0.9f, 1f, 1f)
+        val attrHandle = GLES20.glGetAttribLocation(program, "a_Attribs")
         GLES20.glEnableVertexAttribArray(posHandle)
-        drawBuffer.position(0)
-        GLES20.glVertexAttribPointer(posHandle, 3, GLES20.GL_FLOAT, false, 0, drawBuffer)
+        posBuf.position(0)
+        GLES20.glVertexAttribPointer(posHandle, 3, GLES20.GL_FLOAT, false, PreviewCloud.STRIDE, posBuf)
+        if (attrHandle >= 0) {
+            GLES20.glEnableVertexAttribArray(attrHandle)
+            attrBuf.position(12)
+            GLES20.glVertexAttribPointer(
+                attrHandle, 4, GLES20.GL_UNSIGNED_BYTE, true, PreviewCloud.STRIDE, attrBuf
+            )
+        }
         GLES20.glDrawArrays(GLES20.GL_POINTS, 0, drawCount)
         GLES20.glDisableVertexAttribArray(posHandle)
+        if (attrHandle >= 0) GLES20.glDisableVertexAttribArray(attrHandle)
 
         // --- Reference circles at the pivot (scaled to stay visible across the range) ---
         val pivotScale = camera.camDist() * 0.07f
         drawMarkerCircles(camera.pivot, pivotScale,
             floatArrayOf(1f, 0f, 0f, 1f), floatArrayOf(0f, 1f, 0f, 1f), floatArrayOf(0f, 0f, 1f, 1f))
+
+        // --- LiDAR path polyline (yellow), when enabled ---
+        if (showTrajectory) drawTrajectory()
 
         // --- Live preview: current sensor pose marker (amber) ---
         poseMarker?.let { p ->
@@ -231,13 +284,97 @@ class MyGLRenderer(
     fun camDolly(spreadDeltaPx: Float) = camera.dolly(spreadDeltaPx)
     fun camPan(dxPx: Float, dyPx: Float) = camera.pan(dxPx, dyPx, surfaceHeight)
 
-    /** Frame the whole cloud. Recomputes bounds from the live preview when streaming. */
+    /** Frame the whole cloud. Pulls fresh bounds from the live preview when streaming. */
     fun frameAll() {
         val source = previewSource
-        if (source != null) {
-            if (computeBounds(source.buffer, source.pointCount)) applyBoundsToCamera()
+        if (source != null && source.pointCount > 0) {
+            boundsMin[0] = source.minX; boundsMin[1] = source.minY; boundsMin[2] = source.minZ
+            boundsMax[0] = source.maxX; boundsMax[1] = source.maxY; boundsMax[2] = source.maxZ
+            hasBounds = true
+            applyBoundsToCamera()
         }
-        if (hasBounds || source != null) camera.frame(aspect(), animate = true)
+        if (hasBounds) camera.frame(aspect(), animate = true)
+    }
+
+    // ====== Coloring / filtering (called on the GL thread via queueEvent) ======
+
+    fun setColorMode(mode: ColorMode) { colorMode = mode }
+
+    /** Intensity-mode reflectivity window, low/high normalized to [0,1]. */
+    fun setReflBounds(low: Float, high: Float) {
+        reflLow = low.coerceIn(0f, 1f)
+        reflHigh = high.coerceIn(0f, 1f)
+    }
+
+    fun setNoiseFilter(level: NoiseFilter) { noiseFilter = level }
+
+    /** Show/hide the LiDAR path polyline. */
+    fun setShowTrajectory(on: Boolean) { showTrajectory = on }
+
+    /** True once a path with at least a couple of points is available (live or loaded). */
+    fun hasTrajectory(): Boolean = (trajectorySource?.pointCount ?: 0) >= 2
+
+    /** Draw the accumulated LiDAR path as a yellow line strip (uniform-color path, no discard). */
+    private fun drawTrajectory() {
+        val traj = trajectorySource ?: return
+        val count = traj.pointCount
+        if (count < 2) return
+        val mvp = FloatArray(16)
+        Matrix.multiplyMM(mvp, 0, projectionMatrix, 0, viewMatrix, 0)
+        val posHandle = GLES20.glGetAttribLocation(program, "a_Position")
+        GLES20.glUniformMatrix4fv(GLES20.glGetUniformLocation(program, "u_MVPMatrix"), 1, false, mvp, 0)
+        GLES20.glUniform1i(GLES20.glGetUniformLocation(program, "u_ColorMode"), 0)
+        GLES20.glUniform1i(GLES20.glGetUniformLocation(program, "u_NoiseFilter"), 0)
+        GLES20.glUniform4f(GLES20.glGetUniformLocation(program, "u_Color"), 1f, 0.85f, 0.1f, 1f)
+        GLES20.glLineWidth(3f)
+        GLES20.glEnableVertexAttribArray(posHandle)
+        traj.buffer.position(0)
+        GLES20.glVertexAttribPointer(posHandle, 3, GLES20.GL_FLOAT, false, 0, traj.buffer)
+        GLES20.glDrawArrays(GLES20.GL_LINE_STRIP, 0, count)
+        GLES20.glDisableVertexAttribArray(posHandle)
+    }
+
+    // Scratch outputs reused each frame to avoid per-frame allocation.
+    private val tmpCenter = FloatArray(3)
+    private val tmpHeight = FloatArray(2)
+
+    /** Center of the active cloud's bounds — the fallback "sensor" for distance mode with no pose. */
+    private fun boundsCenter(source: PreviewCloud?): FloatArray {
+        if (source != null && source.pointCount > 0) {
+            tmpCenter[0] = (source.minX + source.maxX) * 0.5f
+            tmpCenter[1] = (source.minY + source.maxY) * 0.5f
+            tmpCenter[2] = (source.minZ + source.maxZ) * 0.5f
+        } else {
+            tmpCenter[0] = (boundsMin[0] + boundsMax[0]) * 0.5f
+            tmpCenter[1] = (boundsMin[1] + boundsMax[1]) * 0.5f
+            tmpCenter[2] = (boundsMin[2] + boundsMax[2]) * 0.5f
+        }
+        return tmpCenter
+    }
+
+    /** (minZ, maxZ) of the active cloud for the height colormap; never a zero-width range. */
+    private fun heightRange(source: PreviewCloud?): FloatArray {
+        var lo: Float; var hi: Float
+        if (source != null && source.pointCount > 0) {
+            lo = source.minZ; hi = source.maxZ
+        } else {
+            lo = boundsMin[2]; hi = boundsMax[2]
+        }
+        if (hi - lo < 1e-3f) hi = lo + 1f
+        tmpHeight[0] = lo; tmpHeight[1] = hi
+        return tmpHeight
+    }
+
+    /** Bounds diagonal, used to normalize the distance colormap. */
+    private fun distScale(source: PreviewCloud?): Float {
+        val dx: Float; val dy: Float; val dz: Float
+        if (source != null && source.pointCount > 0) {
+            dx = source.maxX - source.minX; dy = source.maxY - source.minY; dz = source.maxZ - source.minZ
+        } else {
+            dx = boundsMax[0] - boundsMin[0]; dy = boundsMax[1] - boundsMin[1]; dz = boundsMax[2] - boundsMin[2]
+        }
+        val diag = sqrt(dx * dx + dy * dy + dz * dz)
+        return if (diag > 0.5f) diag else 12f
     }
 
     /** Double-tap-then-drag → slide the pivot along the world-up (Z) axis, live. */
@@ -264,6 +401,9 @@ class MyGLRenderer(
         val mvpHandle = GLES20.glGetUniformLocation(program, "u_MVPMatrix")
         GLES20.glUniformMatrix4fv(mvpHandle, 1, false, mvp, 0)
         GLES20.glUniform4f(colorHandle, 1f, 0.92f, 0.2f, 1f) // yellow
+        // Draw the overlay with the plain uniform-color path (no colormap / no discard).
+        GLES20.glUniform1i(GLES20.glGetUniformLocation(program, "u_ColorMode"), 0)
+        GLES20.glUniform1i(GLES20.glGetUniformLocation(program, "u_NoiseFilter"), 0)
         GLES20.glEnableVertexAttribArray(posHandle)
         rulerBuffer.position(0)
         GLES20.glVertexAttribPointer(posHandle, 3, GLES20.GL_FLOAT, false, 0, rulerBuffer)
@@ -272,24 +412,6 @@ class MyGLRenderer(
     }
 
     // ====== Bounds ======
-
-    /** Track min/max while streaming xyz into [out]; returns false if empty. */
-    private fun computeBounds(buffer: FloatBuffer, count: Int): Boolean {
-        if (count <= 0) return false
-        var minX = Float.MAX_VALUE; var minY = Float.MAX_VALUE; var minZ = Float.MAX_VALUE
-        var maxX = -Float.MAX_VALUE; var maxY = -Float.MAX_VALUE; var maxZ = -Float.MAX_VALUE
-        for (i in 0 until count) {
-            val o = i * 3
-            val x = buffer.get(o); val y = buffer.get(o + 1); val z = buffer.get(o + 2)
-            if (x < minX) minX = x; if (x > maxX) maxX = x
-            if (y < minY) minY = y; if (y > maxY) maxY = y
-            if (z < minZ) minZ = z; if (z > maxZ) maxZ = z
-        }
-        boundsMin[0] = minX; boundsMin[1] = minY; boundsMin[2] = minZ
-        boundsMax[0] = maxX; boundsMax[1] = maxY; boundsMax[2] = maxZ
-        hasBounds = true
-        return true
-    }
 
     private fun applyBoundsToCamera() {
         val cx = (boundsMin[0] + boundsMax[0]) * 0.5f
@@ -302,7 +424,7 @@ class MyGLRenderer(
         camera.setScene(cx, cy, cz, radius)
     }
 
-    // ====== Shaders / parsing (unchanged pipeline) ======
+    // ====== Shaders / parsing ======
 
     private fun readShader(name: String): String =
         context.assets.open(name).bufferedReader().use { it.readText() }
@@ -313,7 +435,14 @@ class MyGLRenderer(
             GLES20.glCompileShader(it)
         }
 
-    private fun parsePCD(context: Context): Pair<FloatBuffer, Int> {
+    /**
+     * Parse a binary `.pcd` (8 float32/point on disk) into an interleaved 16-byte-per-point
+     * buffer matching the live layout: xyz float32 + reflectivity/tag/line/reserved bytes.
+     * The 4th on-disk float is the Livox intensity (0–255) → the reflectivity byte, so the
+     * saved-file viewer gets Intensity/Height/Distance coloring for free; tag/line are 0
+     * (not present on disk), which the Tag mode / noise filter treat as "normal".
+     */
+    private fun parsePCD(context: Context): Pair<ByteBuffer, Int> {
         val reader = BufferedReader(InputStreamReader(openScanFile(context)))
         val headerLines = mutableListOf<String>()
         var line: String?
@@ -337,9 +466,8 @@ class MyGLRenderer(
 
         val sourceBuffer = ByteBuffer.wrap(byteArray).order(ByteOrder.LITTLE_ENDIAN).asFloatBuffer()
 
-        val floatBuffer = ByteBuffer.allocateDirect(pointCount * 3 * 4)
+        val interleaved = ByteBuffer.allocateDirect(pointCount * PreviewCloud.STRIDE)
             .order(ByteOrder.nativeOrder())
-            .asFloatBuffer()
 
         var minX = Float.MAX_VALUE; var minY = Float.MAX_VALUE; var minZ = Float.MAX_VALUE
         var maxX = -Float.MAX_VALUE; var maxY = -Float.MAX_VALUE; var maxZ = -Float.MAX_VALUE
@@ -347,12 +475,20 @@ class MyGLRenderer(
             val x = sourceBuffer.get(i * 8)
             val y = sourceBuffer.get(i * 8 + 1)
             val z = sourceBuffer.get(i * 8 + 2)
-            floatBuffer.put(x); floatBuffer.put(y); floatBuffer.put(z)
+            val intensity = sourceBuffer.get(i * 8 + 3)
+            val o = i * PreviewCloud.STRIDE
+            interleaved.putFloat(o, x)
+            interleaved.putFloat(o + 4, y)
+            interleaved.putFloat(o + 8, z)
+            interleaved.put(o + 12, intensity.coerceIn(0f, 255f).toInt().toByte()) // reflectivity
+            interleaved.put(o + 13, 0)  // tag (absent on disk)
+            interleaved.put(o + 14, 0)  // line (absent on disk)
+            interleaved.put(o + 15, 0)  // reserved
             if (x < minX) minX = x; if (x > maxX) maxX = x
             if (y < minY) minY = y; if (y > maxY) maxY = y
             if (z < minZ) minZ = z; if (z > maxZ) maxZ = z
         }
-        floatBuffer.flip()
+        interleaved.position(0)
 
         if (pointCount > 0) {
             boundsMin[0] = minX; boundsMin[1] = minY; boundsMin[2] = minZ
@@ -360,7 +496,7 @@ class MyGLRenderer(
             hasBounds = true
         }
 
-        return floatBuffer to pointCount
+        return interleaved to pointCount
     }
 
     // ====== Circle drawing ======
@@ -389,6 +525,9 @@ class MyGLRenderer(
         val mvpHandle = GLES20.glGetUniformLocation(program, "u_MVPMatrix")
 
         GLES20.glUniformMatrix4fv(mvpHandle, 1, false, mvpMatrix, 0)
+        // Marker circles use the plain uniform-color path (no colormap / no discard).
+        GLES20.glUniform1i(GLES20.glGetUniformLocation(program, "u_ColorMode"), 0)
+        GLES20.glUniform1i(GLES20.glGetUniformLocation(program, "u_NoiseFilter"), 0)
         GLES20.glEnableVertexAttribArray(positionHandle)
         buffer.position(0)
         GLES20.glVertexAttribPointer(positionHandle, 3, GLES20.GL_FLOAT, false, 0, buffer)

@@ -53,6 +53,34 @@ class SettingsRepository(context: Context) {
             prefs.edit().putBoolean(KEY_VIEWER_ORTHO, value).apply()
         }
 
+    /** Viewer: saved coloring mode (stored as the [ColorMode] name). Library viewer only. */
+    var viewerColorMode: String
+        get() = prefs.getString(KEY_VIEWER_COLOR_MODE, ColorMode.UNIFORM.name) ?: ColorMode.UNIFORM.name
+        set(value) {
+            prefs.edit().putString(KEY_VIEWER_COLOR_MODE, value).apply()
+        }
+
+    /** Viewer: intensity-mode reflectivity window lower bound, normalized [0,1]. */
+    var viewerReflLow: Float
+        get() = prefs.getFloat(KEY_VIEWER_REFL_LOW, 0f)
+        set(value) {
+            prefs.edit().putFloat(KEY_VIEWER_REFL_LOW, value).apply()
+        }
+
+    /** Viewer: intensity-mode reflectivity window upper bound, normalized [0,1]. */
+    var viewerReflHigh: Float
+        get() = prefs.getFloat(KEY_VIEWER_REFL_HIGH, 1f)
+        set(value) {
+            prefs.edit().putFloat(KEY_VIEWER_REFL_HIGH, value).apply()
+        }
+
+    /** Viewer: saved noise-filter level (stored as the [NoiseFilter] name). */
+    var viewerNoiseFilter: String
+        get() = prefs.getString(KEY_VIEWER_NOISE, NoiseFilter.OFF.name) ?: NoiseFilter.OFF.name
+        set(value) {
+            prefs.edit().putString(KEY_VIEWER_NOISE, value).apply()
+        }
+
     companion object {
         // The Jetson's current hotspot IP. Editable in Settings.
         const val DEFAULT_BASE_URL = "http://10.75.93.211:8000"
@@ -63,6 +91,10 @@ class SettingsRepository(context: Context) {
         private const val KEY_SCAN_SORT = "scan_sort"
         private const val KEY_VIEWER_HELPERS = "viewer_helpers"
         private const val KEY_VIEWER_ORTHO = "viewer_ortho"
+        private const val KEY_VIEWER_COLOR_MODE = "viewer_color_mode"
+        private const val KEY_VIEWER_REFL_LOW = "viewer_refl_low"
+        private const val KEY_VIEWER_REFL_HIGH = "viewer_refl_high"
+        private const val KEY_VIEWER_NOISE = "viewer_noise_filter"
 
         /**
          * Normalize user input into a usable base URL: ensure a scheme, drop any
