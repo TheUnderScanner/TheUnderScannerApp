@@ -1,6 +1,13 @@
 package com.underscanner.theunderscannerapp
 
+import android.content.Intent
+import android.net.Uri
+import android.os.Environment
+import android.provider.DocumentsContract
+import android.provider.Settings
 import android.widget.Toast
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.background
@@ -90,6 +97,92 @@ fun SettingsScreen(
                 Box(Modifier.size(12.dp).background(color, CircleShape))
                 Spacer(Modifier.width(8.dp))
                 Text(label, style = MaterialTheme.typography.bodyMedium)
+            }
+
+            HorizontalDivider()
+
+            // --- Storage / All-files access ---------------------------------------------------
+            var storageGranted by remember { mutableStateOf(Environment.isExternalStorageManager()) }
+            val storageLauncher = rememberLauncherForActivityResult(
+                ActivityResultContracts.StartActivityForResult()
+            ) {
+                // The all-files-access screen always returns RESULT_CANCELED; re-check real state.
+                val now = Environment.isExternalStorageManager()
+                if (now && !storageGranted) LocalScanStorage.migrateLegacyScans(context)
+                storageGranted = now
+            }
+
+            Text("Stockage des scans", style = MaterialTheme.typography.titleMedium)
+            Text(
+                "Les scans téléchargés sont enregistrés dans " +
+                    "Stockage interne/Documents/UnderScanner/Scans (visibles dans l'appli Fichiers).",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Box(
+                    Modifier.size(12.dp).background(
+                        if (storageGranted) MaterialTheme.colorScheme.primary
+                        else MaterialTheme.colorScheme.error,
+                        CircleShape
+                    )
+                )
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    if (storageGranted) "Accès aux fichiers autorisé"
+                    else "Accès aux fichiers non autorisé",
+                    style = MaterialTheme.typography.bodyMedium
+                )
+            }
+
+            if (!storageGranted) {
+                Button(
+                    onClick = {
+                        val intent = Intent(
+                            Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
+                            Uri.parse("package:${context.packageName}")
+                        )
+                        runCatching { storageLauncher.launch(intent) }.onFailure {
+                            // Some OEMs don't support the per-app screen; open the generic list.
+                            runCatching {
+                                storageLauncher.launch(
+                                    Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION)
+                                )
+                            }
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text("Autoriser l'accès aux fichiers")
+                }
+            }
+
+            // Best-effort "open in file manager": the stock Files app (DocumentsUI) answers an
+            // ACTION_VIEW on a directory document URI. No universal intent exists, so fall back to
+            // just showing the path if no app handles it.
+            OutlinedButton(
+                onClick = {
+                    LocalScanStorage.scansDir(context) // make sure the folder exists to navigate into
+                    val treeUri = DocumentsContract.buildDocumentUri(
+                        "com.android.externalstorage.documents",
+                        "primary:Documents/UnderScanner/Scans"
+                    )
+                    val open = Intent(Intent.ACTION_VIEW).apply {
+                        setDataAndType(treeUri, DocumentsContract.Document.MIME_TYPE_DIR)
+                        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                    }
+                    runCatching { context.startActivity(open) }.onFailure {
+                        Toast.makeText(
+                            context,
+                            "Dossier : Stockage interne/Documents/UnderScanner/Scans",
+                            Toast.LENGTH_LONG
+                        ).show()
+                    }
+                },
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text("Ouvrir le dossier des scans")
             }
         }
     }

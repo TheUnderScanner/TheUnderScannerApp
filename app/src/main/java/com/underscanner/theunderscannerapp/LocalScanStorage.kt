@@ -1,6 +1,7 @@
 package com.underscanner.theunderscannerapp
 
 import android.content.Context
+import android.os.Environment
 import java.io.File
 
 /**
@@ -8,15 +9,51 @@ import java.io.File
  *
  * "Downloaded" is defined by the file existing here — there is no server flag.
  * The OpenGL viewer also reads `.pcd` files from this same directory.
+ *
+ * Files live in the **public** `Documents/UnderScanner/Scans` folder (visible in the Files app
+ * and over USB) rather than app-private storage, so scans are easy to find and copy off the
+ * phone. Writing there requires All-files access (see [MainActivity] permission prompt).
  */
 object LocalScanStorage {
 
-    /** App-scoped directory holding downloaded `.pcd` files. */
+    /** Public sub-path under Documents where scans are stored. */
+    private const val PUBLIC_SUBDIR = "UnderScanner/Scans"
+
+    /** Public directory (Internal storage/Documents/UnderScanner/Scans) holding downloaded `.pcd` files. */
     fun scansDir(context: Context): File {
-        val base = context.getExternalFilesDir(null) ?: context.filesDir
-        val dir = File(base, "Scans")
+        val documents = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOCUMENTS)
+        val dir = File(documents, PUBLIC_SUBDIR)
         if (!dir.exists()) dir.mkdirs()
         return dir
+    }
+
+    /** Legacy app-private directory used before scans moved to public Documents (for migration). */
+    private fun legacyScansDir(context: Context): File =
+        File(context.getExternalFilesDir(null) ?: context.filesDir, "Scans")
+
+    /**
+     * One-time move of any scans left in the old app-private folder into the public one.
+     * Safe to call repeatedly; only runs work while the legacy folder still holds files.
+     * Requires All-files access to be granted (so the public dir is writable) — call after grant.
+     */
+    fun migrateLegacyScans(context: Context) {
+        val legacy = legacyScansDir(context)
+        val files = legacy.takeIf { it.isDirectory }?.listFiles()?.filter { it.isFile } ?: return
+        if (files.isEmpty()) {
+            legacy.delete() // prune the now-empty legacy dir
+            return
+        }
+        val target = scansDir(context)
+        files.forEach { src ->
+            val dst = File(target, src.name)
+            if (dst.exists()) {
+                src.delete() // already migrated
+            } else {
+                runCatching { src.copyTo(dst, overwrite = false) }
+                    .onSuccess { src.delete() }
+            }
+        }
+        legacy.delete() // remove the legacy dir once emptied (no-op if copies failed)
     }
 
     /** Local file a scan's point cloud is (or would be) stored at. */

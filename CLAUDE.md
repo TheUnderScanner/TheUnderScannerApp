@@ -126,8 +126,13 @@ drawn as a yellow polyline (`Trajectory.kt` + `MyGLRenderer.drawTrajectory`, `GL
   a server flag.
 
 - **LocalScanStorage.kt** — single source of truth for on-device files: downloaded `.pcd`s
-  live in `getExternalFilesDir("Scans")` (this is also where the OpenGL viewer reads from);
-  the last `/scans` JSON is cached to `filesDir/scans_cache.json`.
+  live in the **public** `Documents/UnderScanner/Scans` folder
+  (`Environment.DIRECTORY_DOCUMENTS/UnderScanner/Scans`, i.e. *Internal storage/Documents/…*, so
+  they're browsable in the Files app and over USB; this is also where the OpenGL viewer reads from);
+  the last `/scans` JSON is cached to `filesDir/scans_cache.json`. Writing to the public folder
+  needs **All-files access** (`MANAGE_EXTERNAL_STORAGE`), prompted for at startup by
+  `MainActivity.StoragePermissionPrompt`; `migrateLegacyScans()` moves scans from the old
+  app-private `getExternalFilesDir("Scans")` location on first grant/launch.
 
 - **SettingsRepository.kt** — persists and normalizes the editable Jetson base URL
   (SharedPreferences `underscanner_settings`).
@@ -251,8 +256,8 @@ drawn as a yellow polyline (`Trajectory.kt` + `MyGLRenderer.drawTrajectory`, `GL
    and on first successful contact fetches `/scans` (also written to the offline cache).
 2. Pull-to-refresh re-fetches `/scans`. Offline, the cached list still renders.
 3. **Download**: tapping Download streams `/scans/{name}/pcd` to
-   `getExternalFilesDir("Scans")/<name>.pcd` with progress; on success the row switches to
-   **Open**.
+   `Documents/UnderScanner/Scans/<name>.pcd` (public storage) with progress; on success the row
+   switches to **Open**.
 4. **Open**: navigates to `pcdViewer/<name>.pcd`; `MyGLRenderer` parses and renders the
    local file. Works offline once downloaded.
 5. **Config**: `GET /scans/{name}/config` shown read-only (monospaced, copyable).
@@ -267,7 +272,8 @@ the Jetson; re-entering reconnects; a dropped socket auto-reconnects with backof
 
 ## Network Configuration
 
-- Permissions: `INTERNET`, `ACCESS_NETWORK_STATE`.
+- Permissions: `INTERNET`, `ACCESS_NETWORK_STATE`, `MANAGE_EXTERNAL_STORAGE` (All-files access,
+  so scans can be written to public `Documents/UnderScanner/Scans`).
 - `res/xml/network_security_config.xml` permits cleartext HTTP to any host (dev app; the
   Jetson is plain HTTP on the hotspot and its IP changes).
 
