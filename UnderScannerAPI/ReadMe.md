@@ -20,6 +20,21 @@ récupérer `app.py` du Jetson, patcher **cette** version, puis la renvoyer.
 scp orin4slam@<ip>:~/underscanner-api/app.py ./app.py     # récupérer la version qui tourne
 scp ./app.py orin4slam@<ip>:~/underscanner-api/app.py     # renvoyer après modif
 ```
+OU
+
+```
+ssh orin4slam@10.75.93.211 'cp ~/underscanner-api/app.py ~/underscanner-api/app.py.bak'
+scp UnderScannerAPI/app.py orin4slam@10.75.93.211:~/underscanner-api/app.py
+
+```
+PUIS
+```
+ssh -t orin4slam@10.75.93.211 'sudo systemctl restart underscanner'
+```
+Vérif
+```
+curl -s http://10.75.93.211:8000/status
+```
 
 ## Commandes courantes une fois connecté
 

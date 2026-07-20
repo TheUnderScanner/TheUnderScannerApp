@@ -37,8 +37,32 @@ Notes:
     logs the fields it actually sees on the first cloud (see PreviewNode).
   * Pose messages are still sent as JSON text (unchanged).
   * GET /preview/format returns this layout as JSON for the client to verify.
+
+------------------------------------------------------------------------------
+PER-SCAN HEALTH LOG  (health/{scan}.jsonl)
+------------------------------------------------------------------------------
+JSON Lines. Line 1 is a header, every following line is one sample:
+
+    {"type":"header","v":1,"scan":...,"started_at":...,"interval_s":5.0,
+     "static":{"cpu_cores":6,"cpu_max_mhz":1728,"mem_total_mb":7607,
+               "power_mode":"MAXN_SUPER","zones":[...],"rails":[...]}}
+    {"t":5.0,"cpu":41.2,"cpu_f":1420,"gpu":3.0,"mem":1024,
+     "t_cpu":52.1,"t_gpu":51.0,"t_soc":50.5,"t_tj":52.5,
+     "w_in":8.21,"w_cpu_gpu":3.10,"w_soc":1.22,"disk_free":186.2,
+     "cloud_hz":9.8,"odom_hz":10.1,"odom_ok":true,"cloud_ok":true,
+     "pts":4210,"traj_n":812}
+
+  * "t" is seconds since the scan started; one sample every HEALTH_WRITE_S.
+  * EVERY field except "t" is optional — a key is absent when the board doesn't
+    expose that sensor or the value wasn't readable for that sample. Read the
+    available series from the header's "static", never from a hard-coded list.
+  * JSONL, not a JSON array, so a scan cut short by a dead battery still parses
+    up to its last complete line. The file is append-only through a handle held
+    open for the whole scan: write cost does not grow with scan length.
+  * GET /scans/{name}/health serves the file; GET /system/health returns the
+    latest live sample for the control-room / active-scan HUD.
 """
-import os, re, json, socket, struct, time, signal, threading, datetime, subprocess, asyncio
+import os, re, glob, json, socket, struct, time, signal, threading, datetime, subprocess, asyncio
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
@@ -57,6 +81,7 @@ from sensor_msgs_py import point_cloud2
 DATA_ROOT = Path(os.environ.get("UNDERSCANNER_DATA", "/data/underscanner"))
 BAGS, MAPS, CONFIGS, NOTES = (DATA_ROOT / d for d in ("bags", "maps", "configs", "notes"))
 TRAJ = DATA_ROOT / "trajectories"          # per-scan LiDAR path (/Odometry) files
+HEALTH = DATA_ROOT / "health"              # per-scan JSONL system-health logs
 SCAN_STATE = DATA_ROOT / ".current_scan"
 FASTLIO_CONFIG = Path(os.path.expanduser(
     os.environ.get("FASTLIO_CONFIG", "~/ws_fastlio/src/FAST_LIO_ROS2/config/mid360.yaml")))
@@ -93,7 +118,30 @@ CLOUD_DTYPE = np.dtype([
 ])
 assert CLOUD_DTYPE.itemsize == CLOUD_STRIDE
 
-app = FastAPI(title="Underscanner Backend", version="2.1")
+# ---- system health telemetry ----
+# Everything is read from unprivileged sysfs/procfs. Paths that vary by board or
+# JetPack version are probed ONCE at startup and cached: on the Orin Nano the
+# cv0/cv1/cv2 thermal zones exist but their temp node returns EAGAIN (sensor not
+# wired), so re-probing every second would spam the journal forever.
+THERMAL_GLOB    = "/sys/class/thermal/thermal_zone*"
+GPU_LOAD_PATHS  = ("/sys/devices/platform/bus@0/17000000.gpu/load",)
+INA_GLOB        = "/sys/bus/i2c/drivers/ina3221/*/hwmon/hwmon*"
+NVPMODEL_STATUS = "/var/lib/nvpmodel/status"
+NVPMODEL_CONF   = "/etc/nvpmodel.conf"
+
+HEALTH_SAMPLE_S = 1.0   # internal sample period (CPU% is a delta — needs two reads)
+HEALTH_WRITE_S  = 5.0   # one JSONL line per this many seconds while a scan runs
+HEALTH_FLUSH_S  = 10.0  # flush cadence; never fsync per sample (slow on eMMC/NVMe)
+
+# Thermal zones we keep, mapped to short names. The three soc* zones collapse onto
+# one series ("soc") and are reported as their max — they track within ~1 degC.
+ZONE_MAP = {"cpu-thermal": "cpu", "gpu-thermal": "gpu", "tj-thermal": "tj",
+            "soc0-thermal": "soc", "soc1-thermal": "soc", "soc2-thermal": "soc"}
+# INA3221 rail labels -> short names. This kernel exposes bus voltage (mV) and
+# current (mA) but no power node, so watts are computed as V*I.
+RAIL_MAP = {"VDD_IN": "in", "VDD_CPU_GPU_CV": "cpu_gpu", "VDD_SOC": "soc"}
+
+app = FastAPI(title="Underscanner Backend", version="2.2")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 # ----------------------------- helpers -----------------------------
@@ -120,6 +168,7 @@ def collect_scan_names():
     if MAPS.is_dir():    names |= {p.stem for p in MAPS.glob("*.pcd")}
     if CONFIGS.is_dir(): names |= {p.stem for p in CONFIGS.glob("*.yaml")}
     if NOTES.is_dir():   names |= {p.stem for p in NOTES.glob("*.json")}
+    if HEALTH.is_dir():  names |= {p.stem for p in HEALTH.glob("*.jsonl")}
     return sorted(names, reverse=True)
 
 def clean_location(location: str) -> str:
@@ -188,7 +237,220 @@ class State:
         self.last_odom_t = 0.0
         self.trajectory: list[tuple[float, float, float]] = []  # /Odometry path, this scan
         self.traj_last: tuple[float, float, float] | None = None
+        # Monotonic message counters; HealthMonitor diffs them into rates (Hz).
+        self.cloud_count = 0
+        self.odom_count = 0
+        self.last_cloud_pts = 0      # points in the most recent (downsampled) frame
 S = State()
+
+# ----------------------------- system health -----------------------------
+def _read(p, default=None):
+    """Read a sysfs/procfs file, tolerating EAGAIN and vanished nodes."""
+    try:
+        return Path(p).read_text().strip()
+    except Exception:
+        return default
+
+def _read_int(p):
+    try:
+        return int(_read(p))
+    except (TypeError, ValueError):
+        return None
+
+class HealthMonitor:
+    """Samples Jetson load / thermal / power and appends them to a per-scan log.
+
+    Sampling (1 Hz) is deliberately decoupled from logging (0.2 Hz): CPU% is a delta
+    and needs a short window to mean anything, but a chart only needs a point every
+    few seconds. The live endpoint serves the last cached sample, so it never touches
+    the filesystem on the request path.
+
+    The log is append-only through a handle held open for the whole scan, so each
+    write costs the same whether the scan is one minute or five hours old. It is
+    never read back and rewritten. JSONL (not a JSON array) so that a scan cut short
+    by a dead battery still parses up to its last complete line.
+    """
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.latest: dict = {}
+        self._prev_cpu = None            # (busy, total) jiffies
+        self._prev_counts = (0, 0, 0.0)  # (cloud_count, odom_count, t)
+        self._fh = None
+        self._start = 0.0
+        self._last_write = 0.0
+        self._last_flush = 0.0
+        self._probe()
+
+    # ---- one-time hardware probing ----
+    def _probe(self):
+        self.zones: dict[str, list[str]] = {}
+        for z in sorted(glob.glob(THERMAL_GLOB)):
+            zt = _read(f"{z}/type")
+            if zt not in ZONE_MAP:
+                continue
+            if _read_int(f"{z}/temp") is None:      # cv*-thermal on Orin Nano: EAGAIN
+                continue
+            self.zones.setdefault(ZONE_MAP[zt], []).append(f"{z}/temp")
+
+        self.gpu_load = next((p for p in GPU_LOAD_PATHS if _read_int(p) is not None), None)
+
+        self.rails: list[tuple[str, str, str]] = []     # (name, volt path, curr path)
+        for h in sorted(glob.glob(INA_GLOB)):
+            for i in (1, 2, 3):
+                name = RAIL_MAP.get(_read(f"{h}/in{i}_label"))
+                if name and _read_int(f"{h}/in{i}_input") is not None:
+                    self.rails.append((name, f"{h}/in{i}_input", f"{h}/curr{i}_input"))
+
+        self.cores = os.cpu_count() or 1
+        mx = _read_int("/sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq")
+        self.cpu_max_mhz = round(mx / 1000) if mx else None
+        self.mem_total_mb = round(self._meminfo().get("MemTotal", 0) / 1024) or None
+        self.power_mode = self._power_mode()
+
+    @staticmethod
+    def _power_mode():
+        """Active nvpmodel profile, resolved to its name — without needing sudo."""
+        m = re.search(r"pmode:\s*(\d+)", _read(NVPMODEL_STATUS, "") or "")
+        if not m:
+            return None
+        pid = int(m.group(1))
+        nm = re.search(rf"POWER_MODEL\s+ID=0*{pid}\s+NAME=(\S+)", _read(NVPMODEL_CONF, "") or "")
+        return nm.group(1) if nm else f"mode {pid}"
+
+    # ---- individual metrics ----
+    @staticmethod
+    def _meminfo() -> dict:
+        out = {}
+        try:
+            with open("/proc/meminfo") as f:
+                for line in f:
+                    k, _, v = line.partition(":")
+                    if k in ("MemTotal", "MemAvailable"):
+                        out[k] = float(v.strip().split()[0])     # kB
+                        if len(out) == 2:
+                            break
+        except Exception:
+            pass
+        return out
+
+    def _cpu_percent(self):
+        """Aggregate busy% since the previous sample (None on the very first call)."""
+        try:
+            with open("/proc/stat") as f:
+                parts = f.readline().split()
+        except Exception:
+            return None
+        if len(parts) < 8 or parts[0] != "cpu":
+            return None
+        v = [int(x) for x in parts[1:8]]
+        total = sum(v)
+        busy = total - (v[3] + v[4])            # minus idle + iowait
+        prev, self._prev_cpu = self._prev_cpu, (busy, total)
+        if prev is None:
+            return None
+        db, dt = busy - prev[0], total - prev[1]
+        return round(100.0 * db / dt, 1) if dt > 0 else None
+
+    def _cpu_mhz(self):
+        fs = [v for v in (_read_int(f"/sys/devices/system/cpu/cpu{c}/cpufreq/scaling_cur_freq")
+                          for c in range(self.cores)) if v]
+        return round(sum(fs) / len(fs) / 1000) if fs else None
+
+    def sample(self, now: float) -> dict:
+        d = {"cpu": self._cpu_percent(), "cpu_f": self._cpu_mhz()}
+
+        if self.gpu_load:
+            g = _read_int(self.gpu_load)
+            d["gpu"] = round(g / 10.0, 1) if g is not None else None    # per-mille -> %
+
+        mi = self._meminfo()
+        if mi.get("MemTotal"):
+            d["mem"] = round((mi["MemTotal"] - mi.get("MemAvailable", 0)) / 1024)   # used MB
+
+        for name, paths in self.zones.items():
+            vals = [v for v in (_read_int(p) for p in paths) if v is not None]
+            d[f"t_{name}"] = round(max(vals) / 1000.0, 1) if vals else None
+
+        for name, vp, cp in self.rails:
+            mv, ma = _read_int(vp), _read_int(cp)
+            d[f"w_{name}"] = round(mv * ma / 1e6, 2) if None not in (mv, ma) else None
+
+        try:                                    # statvfs is O(1) — never walk the bag dir
+            st = os.statvfs(DATA_ROOT)
+            d["disk_free"] = round(st.f_bavail * st.f_frsize / 2**30, 1)            # GiB
+        except Exception:
+            pass
+
+        with S.lock:
+            cc, oc = S.cloud_count, S.odom_count
+            d["pts"] = S.last_cloud_pts
+            d["traj_n"] = len(S.trajectory)
+            d["odom_ok"] = (now - S.last_odom_t) < 2.0
+            d["cloud_ok"] = (now - S.last_cloud_t) < 2.0
+        pc, po, pt = self._prev_counts
+        dt = now - pt
+        if pt and dt > 0:
+            d["cloud_hz"] = round((cc - pc) / dt, 1)
+            d["odom_hz"] = round((oc - po) / dt, 1)
+        self._prev_counts = (cc, oc, now)
+        return d
+
+    # ---- per-scan log ----
+    def open_log(self, name: str, started_at: float):
+        self.close_log()
+        try:
+            HEALTH.mkdir(parents=True, exist_ok=True)
+            fh = open(HEALTH / f"{name}.jsonl", "a", buffering=1 << 16)
+            # Self-describing header: the client reads axis bounds and the available
+            # series from here instead of hard-coding a schema it can't yet know.
+            fh.write(json.dumps({
+                "type": "header", "v": 1, "scan": name,
+                "started_at": iso(started_at), "hostname": socket.gethostname(),
+                "interval_s": HEALTH_WRITE_S,
+                "static": {"cpu_cores": self.cores, "cpu_max_mhz": self.cpu_max_mhz,
+                           "mem_total_mb": self.mem_total_mb, "power_mode": self.power_mode,
+                           "zones": sorted(self.zones), "rails": [r[0] for r in self.rails]},
+            }) + "\n")
+            self._fh, self._start = fh, started_at
+            self._last_write = self._last_flush = 0.0
+        except Exception:
+            self._fh = None
+
+    def close_log(self):
+        fh, self._fh = self._fh, None
+        if fh:
+            try:
+                fh.flush(); fh.close()
+            except Exception:
+                pass
+
+    def _maybe_write(self, snap: dict, now: float):
+        if not self._fh or (now - self._last_write) < HEALTH_WRITE_S:
+            return
+        self._last_write = now
+        rec = {"t": round(now - self._start, 1)}
+        rec.update({k: v for k, v in snap.items() if v is not None})
+        try:
+            self._fh.write(json.dumps(rec, separators=(",", ":")) + "\n")
+            if (now - self._last_flush) >= HEALTH_FLUSH_S:
+                self._fh.flush(); self._last_flush = now
+        except Exception:
+            pass
+
+    def run(self):
+        while True:
+            now = time.time()
+            try:
+                snap = self.sample(now)
+                with self.lock:
+                    self.latest = dict(snap, at=iso(now))
+                self._maybe_write(snap, now)
+            except Exception:
+                pass
+            time.sleep(HEALTH_SAMPLE_S)
+
+H = HealthMonitor()
 
 # ----------------------------- ROS node -----------------------------
 class PreviewNode(Node):
@@ -226,6 +488,8 @@ class PreviewNode(Node):
         with S.lock:
             S.latest_cloud = packed
             S.last_cloud_t = time.time()
+            S.cloud_count += 1
+            S.last_cloud_pts = int(len(idx))
 
     def on_odom(self, msg):
         p, q = msg.pose.pose.position, msg.pose.pose.orientation
@@ -234,6 +498,7 @@ class PreviewNode(Node):
             S.latest_pose = {"type":"pose","x":p.x,"y":p.y,"z":p.z,
                              "qx":q.x,"qy":q.y,"qz":q.z,"qw":q.w,"t":now}
             S.last_odom_t = now
+            S.odom_count += 1
             # Accumulate the path while a scan is running, dedup'd by min step.
             if S.running:
                 pt = (p.x, p.y, p.z)
@@ -283,11 +548,14 @@ def list_scans():
 
         parts = name.split("_"); bs = dir_size(bag); ps = pcd.stat().st_size if pcd.exists() else 0
         traj = TRAJ / f"{name}.traj"
+        hlog = HEALTH / f"{name}.jsonl"
+        hs = hlog.stat().st_size if hlog.exists() else 0
         out.append({"name":name,"date":parts[0],"location":"_".join(parts[1:-1]),"run":parts[-1],
                     "bag":{"present":bag.exists(),"size_bytes":bs,"size_human":human(bs)},
                     "pcd":{"present":pcd.exists(),"size_bytes":ps,"size_human":human(ps)},
                     "config":{"present":cfg.exists()},"notes":{"present":note.exists(), "text": note_text},
-                    "trajectory":{"present":traj.exists()}})
+                    "trajectory":{"present":traj.exists()},
+                    "health":{"present":hlog.exists(),"size_bytes":hs,"size_human":human(hs)}})
     return {"scans": out}
 
 @app.get("/scans/{name}/pcd")
@@ -310,6 +578,14 @@ def download_trajectory(name: str):
     if data is None:
         raise HTTPException(404, "no trajectory for this scan")
     return Response(content=data, media_type="application/octet-stream")
+
+@app.get("/scans/{name}/health")
+def download_health(name: str):
+    """Per-scan health log, JSON Lines: one header record then one sample per line."""
+    safe(name)
+    f = HEALTH / f"{name}.jsonl"
+    if not f.exists(): raise HTTPException(404, "no health log for this scan")
+    return FileResponse(f, media_type="application/x-ndjson", filename=f"{name}.jsonl")
 
 @app.get("/scans/{name}/config", response_class=PlainTextResponse)
 def get_config(name: str):
@@ -364,7 +640,7 @@ async def scan_start(request: Request):
         body = await request.json(); location = (body or {}).get("location")
     except Exception:
         pass
-    for d in (BAGS, MAPS, CONFIGS, NOTES, TRAJ): d.mkdir(parents=True, exist_ok=True)
+    for d in (BAGS, MAPS, CONFIGS, NOTES, TRAJ, HEALTH): d.mkdir(parents=True, exist_ok=True)
     name = make_scan_name(location); SCAN_STATE.write_text(name)
 
     spawn("driver", LIDAR_LAUNCH); time.sleep(3.0)         # let the driver come up
@@ -376,7 +652,9 @@ async def scan_start(request: Request):
     with S.lock:
         S.running, S.scan, S.started_at = True, name, time.time()
         S.trajectory, S.traj_last = [], None
-    return {"scan":name,"running":True,"started_at":iso(S.started_at)}
+        started_at = S.started_at
+    H.open_log(name, started_at)
+    return {"scan":name,"running":True,"started_at":iso(started_at)}
 
 @app.post("/scan/stop")
 def scan_stop():
@@ -418,6 +696,8 @@ def scan_stop():
             (TRAJ / f"{name}.traj").write_bytes(pack_trajectory(pts))
     except Exception: pass
 
+    H.close_log()                                          # flush + close the health log
+
     with S.lock:
         S.running, S.scan, S.started_at = False, None, None
         S.latest_cloud, S.latest_pose = None, None
@@ -440,6 +720,20 @@ def scan_status():
 
 
 # ------------------------------- SYSTEM -------------------------------
+@app.get("/system/health")
+def system_health():
+    """Latest cached telemetry sample — the sampler thread does the I/O, not this handler.
+
+    Keys are omitted when the board doesn't expose them, so the client must treat every
+    field as optional (see HealthMonitor._probe).
+    """
+    with H.lock:
+        snap = dict(H.latest)
+    snap["static"] = {"cpu_cores": H.cores, "cpu_max_mhz": H.cpu_max_mhz,
+                      "mem_total_mb": H.mem_total_mb, "power_mode": H.power_mode,
+                      "zones": sorted(H.zones), "rails": [r[0] for r in H.rails]}
+    return snap
+
 @app.post("/system/shutdown")
 def system_shutdown():
     with S.lock:
@@ -489,6 +783,7 @@ async def _startup():
     node = PreviewNode()
     exe = MultiThreadedExecutor(); exe.add_node(node)
     threading.Thread(target=exe.spin, daemon=True).start()
+    threading.Thread(target=H.run, daemon=True).start()
     asyncio.create_task(broadcaster())
 
 if __name__ == "__main__":
