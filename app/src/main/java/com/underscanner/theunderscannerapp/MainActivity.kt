@@ -22,6 +22,8 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
@@ -33,6 +35,7 @@ import com.underscanner.theunderscannerapp.ui.theme.TheUnderScannerAppTheme
 class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        hideStatusBar()
         // Already-granted users: move any scans left in the old app-private folder to the public
         // one. Off the main thread since .pcd files can be tens of MB. Idempotent + no-op if empty.
         if (Environment.isExternalStorageManager()) {
@@ -49,6 +52,33 @@ class MainActivity : AppCompatActivity() {
                 }
             }
         }
+    }
+
+    /**
+     * Hide Android's status bar (clock, battery, notification icons) app-wide.
+     *
+     * The phone is this device's only screen and is used one-handed underground, so the
+     * system bar was overlapping app chrome for no benefit. A swipe from the top still
+     * reveals it transiently (BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE) — deliberately kept,
+     * because phone battery matters on a long trip and hiding it outright would remove the
+     * only way to check it without leaving the app.
+     *
+     * `decorFitsSystemWindows` is intentionally left alone: hiding the bar already zeroes
+     * its inset, and going edge-to-edge would push content under the navigation bar on
+     * every existing screen for no gain here.
+     */
+    private fun hideStatusBar() {
+        WindowInsetsControllerCompat(window, window.decorView).apply {
+            hide(WindowInsetsCompat.Type.statusBars())
+            systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+        }
+    }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        // Android restores the bars after permission dialogs, app switches and the like,
+        // so re-assert on every focus gain instead of only at creation.
+        if (hasFocus) hideStatusBar()
     }
 }
 
@@ -84,7 +114,18 @@ fun AppNavHost() {
                 viewModel = libraryViewModel,
                 openNotesFor = openNotes.ifBlank { null },
                 onOpenPcd = { scanName -> navController.navigate("pcdViewer/$scanName.pcd") },
+                onOpenHealth = { scanName -> navController.navigate("healthChart/$scanName") },
                 onOpenSettings = { navController.navigate("settings") }
+            )
+        }
+
+        composable(
+            route = "healthChart/{scanName}",
+            arguments = listOf(navArgument("scanName") { type = NavType.StringType })
+        ) { backStackEntry ->
+            HealthChartScreen(
+                scanName = backStackEntry.arguments?.getString("scanName") ?: "",
+                onBack = { navController.popBackStack() }
             )
         }
 

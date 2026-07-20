@@ -4,6 +4,7 @@ import android.content.ActivityNotFoundException
 import android.content.Intent
 import android.net.Uri
 import android.widget.Toast
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
@@ -17,6 +18,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.AnnotatedString
@@ -42,6 +44,8 @@ fun ControlRoomScreen(
     val connection by viewModel.connection
     val scanStatus by viewModel.scanStatus
     val shuttingDown by viewModel.shuttingDown
+    val health by viewModel.health
+    val phase by viewModel.phase
 
     DisposableEffect(Unit) {
         viewModel.startPolling()
@@ -50,6 +54,7 @@ fun ControlRoomScreen(
 
     val isConnected = connection is ConnectionState.Connected
     val running = scanStatus?.running == true
+    val starting = phase == ControlPhase.Starting
     var showStartDialog by remember { mutableStateOf(false) }
     var showShutdownDialog by remember { mutableStateOf(false) }
     var showSshDialog by remember { mutableStateOf(false) }
@@ -132,16 +137,30 @@ fun ControlRoomScreen(
                 }
             }
 
+            if (starting) {
+                StartingScanCard()
+            }
+
             Button(
                 onClick = { showStartDialog = true },
-                enabled = isConnected && !running && !shuttingDown,
+                enabled = isConnected && !running && !shuttingDown && !starting,
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(64.dp)
             ) {
-                Icon(Icons.Default.PlayArrow, null, Modifier.size(28.dp))
-                Spacer(Modifier.width(12.dp))
-                Text("Nouveau scan", style = MaterialTheme.typography.titleMedium)
+                if (starting) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(22.dp),
+                        strokeWidth = 2.dp,
+                        color = LocalContentColor.current
+                    )
+                    Spacer(Modifier.width(12.dp))
+                    Text("Démarrage…", style = MaterialTheme.typography.titleMedium)
+                } else {
+                    Icon(Icons.Default.PlayArrow, null, Modifier.size(28.dp))
+                    Spacer(Modifier.width(12.dp))
+                    Text("Nouveau scan", style = MaterialTheme.typography.titleMedium)
+                }
             }
 
             if (!isConnected && !shuttingDown) {
@@ -150,6 +169,10 @@ fun ControlRoomScreen(
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
+            }
+
+            if (!shuttingDown) {
+                JetsonHealthCard(health = health, stale = !isConnected)
             }
 
             Spacer(Modifier.weight(1f))
@@ -226,6 +249,50 @@ fun ControlRoomScreen(
     }
 }
 
+/**
+ * Feedback while `POST /scan/start` is in flight.
+ *
+ * The backend blocks for at least 5 s on purpose — it sleeps 3 s after spawning the Livox
+ * driver and 2 s after SLAM so each has time to come up before the bag recorder starts.
+ * Without this the user taps and watches an idle screen, so the stage text is timed to
+ * that real sequence rather than being a decorative fake progress bar.
+ */
+@Composable
+private fun StartingScanCard() {
+    var elapsed by remember { mutableStateOf(0) }
+    LaunchedEffect(Unit) {
+        while (true) {
+            kotlinx.coroutines.delay(1000)
+            elapsed++
+        }
+    }
+    val stage = when {
+        elapsed < 3 -> "Démarrage du LiDAR…"
+        elapsed < 5 -> "Initialisation du SLAM…"
+        elapsed < 12 -> "Lancement de l'enregistrement…"
+        else -> "Toujours en cours — le Jetson met plus de temps que prévu."
+    }
+
+    ElevatedCard(modifier = Modifier.fillMaxWidth()) {
+        Row(
+            modifier = Modifier.padding(16.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            CircularProgressIndicator(modifier = Modifier.size(28.dp), strokeWidth = 3.dp)
+            Spacer(Modifier.width(16.dp))
+            Column(Modifier.weight(1f)) {
+                Text("Démarrage du scan", style = MaterialTheme.typography.titleSmall)
+                Spacer(Modifier.height(2.dp))
+                Text(
+                    stage,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
+    }
+}
+
 @Composable
 private fun StartScanDialog(
     initialLocation: String,
@@ -284,6 +351,7 @@ fun ActiveScanScreen(
     val previewPoints by viewModel.previewPoints
     val receiving by viewModel.receiving
     val scanStatus by viewModel.scanStatus
+    val health by viewModel.health
 
     var glView by remember { mutableStateOf<MyGLSurfaceView?>(null) }
     var helpersOn by remember { mutableStateOf(false) }
@@ -349,6 +417,7 @@ fun ActiveScanScreen(
                     HealthDot("odom", scanStatus?.odomOk == true)
                     HealthDot("cloud", scanStatus?.cloudOk == true)
                 }
+                health?.let { HudHealthLine(it) }
                 Text(
                     when {
                         link == PreviewLinkState.Reconnecting -> "Reconnexion…"
@@ -441,6 +510,15 @@ fun ActiveScanScreen(
         }
     }
 
+    // Saving can take the better part of a minute — block the screen and say what's happening.
+    if (phase == ControlPhase.Stopping) {
+        StoppingScanOverlay()
+    }
+    // Leaving mid-save would strand the user on the library with no summary, while the
+    // Jetson is still finalising. The stop itself runs in viewModelScope and would survive,
+    // but there is nothing useful to do elsewhere, so swallow Back until it resolves.
+    BackHandler(enabled = phase == ControlPhase.Stopping) { /* intentionally blocked */ }
+
     // Post-scan summary
     if (phase == ControlPhase.Summary) {
         val result = viewModel.stopResult.value
@@ -468,6 +546,229 @@ fun ActiveScanScreen(
                 }) { Text("Voir la bibliothèque") }
             }
         )
+    }
+}
+
+// ===========================================================================
+// Jetson telemetry readouts (GET /system/health)
+//
+// Every metric is optional — the backend omits keys the board doesn't expose — so
+// each row renders only when its value is present rather than showing a fake 0.
+// ===========================================================================
+
+/** No "warning" role exists in the M3 scheme, so the mid-threshold amber is explicit. */
+private val WarnAmber = Color(0xFFFF9800)
+
+/** Orin throttles around 85-90 degC junction; amber is the "watch it" band below that. */
+@Composable
+private fun tempColor(c: Float): Color = when {
+    c >= 85f -> MaterialTheme.colorScheme.error
+    c >= 70f -> WarnAmber
+    else -> MaterialTheme.colorScheme.onSurface
+}
+
+@Composable
+private fun fractionColor(f: Float): Color = when {
+    f >= 0.90f -> MaterialTheme.colorScheme.error
+    f >= 0.75f -> WarnAmber
+    else -> MaterialTheme.colorScheme.onSurface
+}
+
+private fun f1(v: Float): String = "%.1f".format(v)
+
+@Composable
+private fun MetricRow(label: String, value: String, valueColor: Color = Color.Unspecified) {
+    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+        Text(
+            label,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        Text(
+            value,
+            style = MaterialTheme.typography.bodySmall,
+            color = if (valueColor == Color.Unspecified) MaterialTheme.colorScheme.onSurface else valueColor
+        )
+    }
+}
+
+/** Version-proof mini bar (avoids the M3 progress-indicator API churn). */
+@Composable
+private fun MiniBar(fraction: Float, color: Color) {
+    Box(
+        Modifier
+            .fillMaxWidth()
+            .height(4.dp)
+            .background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(2.dp))
+    ) {
+        Box(
+            Modifier
+                .fillMaxWidth(fraction.coerceIn(0f, 1f))
+                .fillMaxHeight()
+                .background(color, RoundedCornerShape(2.dp))
+        )
+    }
+}
+
+/** Full telemetry card for the Control Room, where there is room for detail. */
+@Composable
+private fun JetsonHealthCard(health: SystemHealth?, stale: Boolean) {
+    ElevatedCard(modifier = Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text("État du Jetson", style = MaterialTheme.typography.titleMedium)
+                health?.static?.powerMode?.let {
+                    Text(
+                        it,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+
+            if (health == null || health.values.isEmpty()) {
+                Text(
+                    "Télémétrie indisponible.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                return@Column
+            }
+
+            if (stale) {
+                Text(
+                    "Valeurs figées — Jetson injoignable.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error
+                )
+            }
+
+            health.cpuPercent?.let { cpu ->
+                val freq = health.cpuMhz?.let { " · ${it.toInt()} MHz" }.orEmpty()
+                MetricRow("CPU", "${f1(cpu)} %$freq", fractionColor(cpu / 100f))
+                MiniBar(cpu / 100f, fractionColor(cpu / 100f))
+            }
+            health.gpuPercent?.let { MetricRow("GPU", "${f1(it)} %") }
+
+            health.memUsedMb?.let { used ->
+                val total = health.static.memTotalMb
+                val label = if (total != null) "${f1(used / 1024f)} / ${f1(total / 1024f)} Go"
+                            else "${f1(used / 1024f)} Go"
+                val frac = health.memFraction
+                MetricRow("RAM", label, frac?.let { fractionColor(it) } ?: Color.Unspecified)
+                frac?.let { MiniBar(it, fractionColor(it)) }
+            }
+
+            // Junction temperature is the one that governs throttling, so it leads.
+            health.tempTj?.let { MetricRow("Temp. jonction", "${f1(it)} °C", tempColor(it)) }
+            listOfNotNull(
+                health.tempCpu?.let { "CPU ${f1(it)}" },
+                health.tempGpu?.let { "GPU ${f1(it)}" },
+                health.tempSoc?.let { "SoC ${f1(it)}" }
+            ).takeIf { it.isNotEmpty() }?.let {
+                MetricRow("Détail", it.joinToString(" · ") + " °C")
+            }
+
+            health.wattsIn?.let { w ->
+                val detail = listOfNotNull(
+                    health["w_cpu_gpu"]?.let { "CPU/GPU ${f1(it)}" },
+                    health["w_soc"]?.let { "SoC ${f1(it)}" }
+                ).joinToString(" · ")
+                MetricRow("Consommation", "${f1(w)} W" + if (detail.isNotEmpty()) "  ($detail)" else "")
+            }
+
+            health.diskFreeGb?.let {
+                MetricRow("Disque libre", "${f1(it)} Go",
+                    if (it < 10f) MaterialTheme.colorScheme.error
+                    else if (it < 25f) WarnAmber else Color.Unspecified)
+            }
+        }
+    }
+}
+
+/**
+ * One-line HUD readout for the Active Scan overlay, where space is tight: the three
+ * numbers that answer "should I worry right now" — throttle, memory, battery.
+ */
+@Composable
+private fun HudHealthLine(health: SystemHealth) {
+    val parts = listOfNotNull(
+        health.tempTj?.let { "${f1(it)} °C" },
+        health.memUsedMb?.let { "${f1(it / 1024f)} Go" },
+        health.wattsIn?.let { "${f1(it)} W" }
+    )
+    if (parts.isEmpty()) return
+    Text(
+        parts.joinToString(" · "),
+        style = MaterialTheme.typography.bodySmall,
+        color = health.tempTj?.let { tempColor(it) } ?: MaterialTheme.colorScheme.onSurface
+    )
+}
+
+/**
+ * Blocking feedback while `POST /scan/stop` is in flight.
+ *
+ * Stopping is the slowest operation in the app: the backend calls `/map_save` (up to 30 s),
+ * then waits for the `.pcd` size to stabilise (up to 10 s) so SLAM can't be killed mid-write,
+ * then SIGINTs the bag recorder, SLAM and the driver in turn (up to 8 s each). A scan of any
+ * size routinely spends 15-30 s here. The stage text follows that real sequence, and the
+ * overlay consumes touches so the still-live 3D view underneath can't be mistaken for an
+ * ongoing scan.
+ */
+@Composable
+private fun StoppingScanOverlay() {
+    var elapsed by remember { mutableStateOf(0) }
+    LaunchedEffect(Unit) {
+        while (true) {
+            kotlinx.coroutines.delay(1000)
+            elapsed++
+        }
+    }
+    val stage = when {
+        elapsed < 8 -> "Enregistrement de la carte…"
+        elapsed < 18 -> "Finalisation du nuage de points…"
+        elapsed < 40 -> "Arrêt du LiDAR et du SLAM…"
+        else -> "Toujours en cours — gros scan, ne quitte pas l'écran."
+    }
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(MaterialTheme.colorScheme.scrim.copy(alpha = 0.75f))
+            // Consume every pointer event so nothing reaches the GL surface below.
+            .pointerInput(Unit) {
+                awaitPointerEventScope {
+                    while (true) awaitPointerEvent().changes.forEach { it.consume() }
+                }
+            },
+        contentAlignment = Alignment.Center
+    ) {
+        ElevatedCard(modifier = Modifier.padding(32.dp)) {
+            Column(
+                modifier = Modifier.padding(24.dp),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                CircularProgressIndicator(modifier = Modifier.size(40.dp), strokeWidth = 3.dp)
+                Spacer(Modifier.height(16.dp))
+                Text("Enregistrement du scan", style = MaterialTheme.typography.titleMedium)
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    stage,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(Modifier.height(10.dp))
+                Text(
+                    "Ne coupe pas le Jetson pendant l'enregistrement.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error
+                )
+            }
+        }
     }
 }
 

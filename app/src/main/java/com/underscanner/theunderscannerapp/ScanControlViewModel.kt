@@ -32,6 +32,14 @@ class ScanControlViewModel(app: Application) : AndroidViewModel(app) {
     private val _scanStatus = mutableStateOf<ScanStatus?>(null)
     val scanStatus: State<ScanStatus?> = _scanStatus
 
+    /**
+     * Latest Jetson telemetry, refreshed by the same loop as the status polls. Holds its last
+     * known value on a failed fetch — the connection indicator already reports the outage, and
+     * blanking the readouts on one dropped packet would just make them flicker.
+     */
+    private val _health = mutableStateOf<SystemHealth?>(null)
+    val health: State<SystemHealth?> = _health
+
     // --- Active-scan flow ---
     private val _phase = mutableStateOf(ControlPhase.Idle)
     val phase: State<ControlPhase> = _phase
@@ -139,6 +147,10 @@ class ScanControlViewModel(app: Application) : AndroidViewModel(app) {
                 if (status.running) _elapsed.value = status.elapsedS
             },
             onFailure = { /* keep last known status; connection state already reflects the error */ }
+        )
+        client.getHealth().fold(
+            onSuccess = { _health.value = it },
+            onFailure = { /* telemetry is best-effort; never let it drive connection state */ }
         )
     }
 

@@ -154,6 +154,31 @@ class ScanApiClient(initialBaseUrl: String) {
             }
         }
 
+    /**
+     * GET /scans/{name}/health — download the per-scan JSONL health log to [destination].
+     * Small (a few hundred KB for a long scan) so it's fetched in one shot. A 404 means the
+     * scan predates health logging; callers treat that as "no log", not an error.
+     */
+    suspend fun downloadHealth(name: String, destination: File): Result<Unit> =
+        withContext(Dispatchers.IO) {
+            runCatching {
+                val request = Request.Builder().url("$baseUrl/scans/$name/health").get().build()
+                client.newCall(request).execute().use { response ->
+                    if (!response.isSuccessful) throw IOException("HTTP ${response.code}")
+                    val body = response.body ?: throw IOException("Empty response body")
+                    try {
+                        body.byteStream().use { input ->
+                            FileOutputStream(destination).use { output -> input.copyTo(output) }
+                        }
+                    } catch (e: Throwable) {
+                        destination.delete()
+                        throw e
+                    }
+                    Unit
+                }
+            }
+        }
+
     private fun parseScans(raw: String): List<ScanInfo> {
         val arr: JSONArray = JSONObject(raw).optJSONArray("scans") ?: JSONArray()
         return (0 until arr.length()).map { ScanInfo.from(arr.getJSONObject(it)) }
@@ -205,6 +230,21 @@ class ScanApiClient(initialBaseUrl: String) {
                     if (response.code == 409) throw ScanAlreadyRunningException()
                     if (!response.isSuccessful) throw IOException("HTTP ${response.code}")
                     Unit
+                }
+        }
+    }
+
+    /**
+     * GET /system/health — latest Jetson telemetry snapshot (load / thermal / power).
+     * Served from the backend's cached sample, so it is cheap enough to sit in the
+     * existing status poll loop.
+     */
+    suspend fun getHealth(): Result<SystemHealth> = withContext(Dispatchers.IO) {
+        runCatching {
+            client.newCall(Request.Builder().url("$baseUrl/system/health").get().build())
+                .execute().use { response ->
+                    if (!response.isSuccessful) throw IOException("HTTP ${response.code}")
+                    SystemHealth.from(JSONObject(response.body?.string().orEmpty().ifEmpty { "{}" }))
                 }
         }
     }

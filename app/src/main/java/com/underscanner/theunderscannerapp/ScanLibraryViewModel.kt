@@ -159,6 +159,7 @@ class ScanLibraryViewModel(app: Application) : AndroidViewModel(app) {
         val known = base.map { scan ->
             scan.copy(
                 downloadedLocally = LocalScanStorage.isDownloaded(context, scan.name),
+                healthLocal = LocalScanStorage.hasHealthLog(context, scan.name),
                 // Prefer the fuller notes text we've fetched (the list payload may omit it).
                 notesText = notesTextCache[scan.name] ?: scan.notesText
             )
@@ -252,8 +253,34 @@ class ScanLibraryViewModel(app: Application) : AndroidViewModel(app) {
             config = ScanArtifact(present = false),
             notes = ScanArtifact(present = false),
             downloadedLocally = true,
+            healthLocal = LocalScanStorage.hasHealthLog(getApplication(), name),
             localOnly = true
         )
+    }
+
+    /**
+     * Make sure the scan's health log is on the phone, then invoke [onReady].
+     *
+     * The log is a small sidecar normally pulled alongside the `.pcd`, but a scan
+     * downloaded before health logging existed — or one whose charts are opened without
+     * downloading the cloud — won't have it yet, so fetch on demand. Already-local logs
+     * open immediately and work offline.
+     */
+    fun openHealthLog(scanName: String, onReady: () -> Unit, onError: (String) -> Unit) {
+        val context = getApplication<Application>()
+        if (LocalScanStorage.hasHealthLog(context, scanName)) {
+            onReady()
+            return
+        }
+        viewModelScope.launch {
+            client.downloadHealth(scanName, LocalScanStorage.healthFile(context, scanName)).fold(
+                onSuccess = {
+                    rebuildList()
+                    onReady()
+                },
+                onFailure = { onError("Journal de santé indisponible pour ce scan.") }
+            )
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -281,6 +308,11 @@ class ScanLibraryViewModel(app: Application) : AndroidViewModel(app) {
                         // Best-effort: grab the sidecar trajectory next to the pcd (ignore 404).
                         client.downloadTrajectory(
                             scan.name, LocalScanStorage.trajFile(context, scan.name)
+                        )
+                        // Same for the health log — a 404 just means a scan from before
+                        // health logging existed.
+                        client.downloadHealth(
+                            scan.name, LocalScanStorage.healthFile(context, scan.name)
                         )
                         downloadProgress.remove(scan.name)
                         rebuildList()

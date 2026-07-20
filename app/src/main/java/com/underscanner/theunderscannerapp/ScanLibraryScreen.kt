@@ -32,6 +32,7 @@ import org.json.JSONObject
 fun ScanLibraryScreen(
     viewModel: ScanLibraryViewModel,
     onOpenPcd: (scanName: String) -> Unit,
+    onOpenHealth: (scanName: String) -> Unit,
     onOpenSettings: () -> Unit,
     openNotesFor: String? = null
 ) {
@@ -96,7 +97,7 @@ fun ScanLibraryScreen(
                         )
                     } else {
                         Column {
-                            Text("Bibliothèque de scans")
+                            Text("Scans")
                             ConnectionLine(connection) { onOpenSettings() }
                         }
                     }
@@ -217,7 +218,16 @@ fun ScanLibraryScreen(
                                 onCancelDownload = { viewModel.cancelDownload(scan.name) },
                                 onOpen = { onOpenPcd(scan.name) },
                                 onEditNotes = { notesScan = scan },
-                                onViewConfig = { configScan = scan }
+                                onViewConfig = { configScan = scan },
+                                onOpenHealth = {
+                                    viewModel.openHealthLog(
+                                        scanName = scan.name,
+                                        onReady = { onOpenHealth(scan.name) },
+                                        onError = { msg ->
+                                            Toast.makeText(context, msg, Toast.LENGTH_LONG).show()
+                                        }
+                                    )
+                                }
                             )
                         }
                     }
@@ -274,7 +284,8 @@ private fun ScanRow(
     onCancelDownload: () -> Unit,
     onOpen: () -> Unit,
     onEditNotes: () -> Unit,
-    onViewConfig: () -> Unit
+    onViewConfig: () -> Unit,
+    onOpenHealth: () -> Unit
 ) {
     ElevatedCard(modifier = Modifier.fillMaxWidth()) {
         Column(Modifier.padding(16.dp)) {
@@ -360,6 +371,16 @@ private fun ScanRow(
 
                 Spacer(Modifier.weight(1f))
 
+                // Health charts. Enabled once the log is on the phone (works offline) or
+                // while connected, so it can still be fetched on demand.
+                if (scan.health.present || scan.healthLocal) {
+                    IconButton(
+                        onClick = onOpenHealth,
+                        enabled = scan.healthLocal || isConnected
+                    ) {
+                        Icon(Icons.Default.Timeline, contentDescription = "Courbes de santé")
+                    }
+                }
                 // Config (read-only, online)
                 if (scan.config.present) {
                     IconButton(onClick = onViewConfig, enabled = isConnected) {

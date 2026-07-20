@@ -74,11 +74,28 @@ Settings (the hotspot-assigned IP changes between sessions); default is in
 | GET | `/scans/{name}/config` | Read config (read-only) | `text/plain` (YAML) |
 | GET | `/scans/{name}/notes` | Read notes form | JSON object (`{}` if none) |
 | PUT | `/scans/{name}/notes` | Save notes form | `{ok: true}` |
+| GET | `/scans/{name}/health` | Per-scan health log | JSONL body; **404** if none |
+| GET | `/system/health` | Live Jetson telemetry | latest cached sample + `static` |
 | POST | `/scan/start` | Start a scan; body `{location}` | `{scan, running, started_at}`; **409** if running |
 | POST | `/scan/stop` | Stop + save | `{scan, running:false, pcd, bag}`; **409** if none |
 | GET | `/scan/status` | Poll scan state | `{running, scan, started_at, elapsed_s, odom_ok, cloud_ok}` |
 | WS | `/ws/preview` | Live preview stream | binary cloud frames + JSON pose |
 | POST | `/system/shutdown` | Power the Jetson off | `{ok}`; **409** if a scan is running |
+
+**System health (`HealthMonitor` in `app.py`):** the backend samples Jetson load/thermal/power
+at 1 Hz from unprivileged sysfs/procfs and appends a line to `health/{scan}.jsonl` every 5 s
+while a scan runs. Sensor paths are probed **once at startup** and cached — on the Orin Nano the
+`cv0/1/2-thermal` zones exist but return `EAGAIN`, so they're dropped at probe time. Watts are
+computed as V×I from the INA3221 rails (`VDD_IN`, `VDD_CPU_GPU_CV`, `VDD_SOC`); this kernel has
+no `power*_input` node. Log format: line 1 is a header (`static` carries `cpu_max_mhz`,
+`mem_total_mb`, `power_mode`, available `zones`/`rails`), every later line is one sample keyed
+`t` (seconds since start). **Every field except `t` is optional** — read available series from
+the header, never a hard-coded list. It's JSONL rather than a JSON array so a scan cut short by
+a dead battery still parses up to its last complete line, and it's written through a handle held
+open for the whole scan so append cost never grows with scan length. Bag size is deliberately
+*not* logged (`dir_size()` walks the directory); `disk_free` via `statvfs` is the O(1) proxy.
+App side: `SystemHealth` (live) and `HealthLog`/`HealthSample` (parsed log) in `ScanModels.kt`
+address series by backend key, so a new metric charts without an app change.
 
 `ScanInfo` carries `name, date, location, run` plus artifact sub-objects `bag`, `pcd`
 (`{present, size_bytes, size_human}`), `config`, and `notes` (`{present, ...}`). For search,
@@ -108,7 +125,12 @@ drawn as a yellow polyline (`Trajectory.kt` + `MyGLRenderer.drawTrajectory`, `GL
 
 ### Key Components
 
-- **MainActivity.kt** — entry point; `AppNavHost` starts at `mainMenu` and wires
+- **MainActivity.kt** — hides Android's **status bar** app-wide (`hideStatusBar()`, re-asserted
+  in `onWindowFocusChanged` since the system restores bars after dialogs/app switches); a swipe
+  from the top still reveals it transiently so phone battery stays checkable.
+  `decorFitsSystemWindows` is deliberately left at its default — hiding the bar already zeroes
+  its inset, and going edge-to-edge would push content under the nav bar on every screen.
+  Also the entry point; `AppNavHost` starts at `mainMenu` and wires
   `scanLibrary`, `settings`, `pcdViewer/{fileName}`, `controlRoom`, `activeScan`. Two shared
   hoisted ViewModels: `ScanLibraryViewModel` (Phase 1) and `ScanControlViewModel` (Phase 2).
 
@@ -148,6 +170,20 @@ drawn as a yellow polyline (`Trajectory.kt` + `MyGLRenderer.drawTrajectory`, `GL
   form dialog (`site, issues, free`). Legacy `conditions` / `estimated_length_m` fields are no
   longer shown or written (existing values stay in the Jetson's JSON, just unused).
 
+- **HealthChartScreen.kt** — post-scan health charts, reached from a scan row's timeline icon
+  (`onOpenHealth`; the log is fetched on demand if it isn't local yet, then works offline).
+  A **"fake landscape" page**: the activity is locked to portrait and the whole content is
+  rotated 90° clockwise, so the user turns the phone *counter-clockwise* and the time axis gets
+  the screen's long edge. The rotated container **must** use `requiredSize(width = maxHeight,
+  height = maxWidth)` — plain `size()` is still bounded by the parent's portrait constraints and
+  gets coerced straight back into a portrait-shaped box. One chart fills the screen at a time and
+  a `HorizontalPager` swipes between them (gestures rotate with the content, so a swipe reads as
+  horizontal once the phone is turned); dots at the bottom show the position. Pages: temperature /
+  load / power / SLAM health, all sharing the same x domain so a feature sits at the same
+  horizontal position across a swipe. A page whose series are all absent from the log is dropped
+  entirely, and `odom_ok`/`cloud_ok` dropouts render as shaded bands behind the rate lines. All
+  axis text is composed with `Text`, never measured inside the Canvas.
+
 - **SettingsScreen.kt** — edit/normalize the Jetson base URL; shows live connection state.
 
 - **PCDViewerScreen.kt** — the 3D viewer wrapper: **no top bar** (the GL surface is
@@ -184,6 +220,17 @@ drawn as a yellow polyline (`Trajectory.kt` + `MyGLRenderer.drawTrajectory`, `GL
   stops the scan implicitly.
 - **ScanControlScreens.kt** — `ControlRoomScreen` (New Scan + sticky location, resume-running
   banner; secondary **SSH** and destructive **Power OFF** actions) and `ActiveScanScreen`
+  - **Starting a scan blocks for 5+ s server-side** (`app.py` sleeps 3 s after spawning the Livox
+    driver and 2 s after SLAM, so each is up before the bag recorder starts). The Control Room
+    therefore shows a `StartingScanCard` with stage text timed to that real sequence, and the
+    New Scan button becomes a disabled spinner — the VM's `phase == Starting` guard already
+    blocked a double `POST /scan/start`, but the button used to still look tappable.
+  - **Stopping is the slowest thing in the app** (`/scan/stop` can take ~60 s worst case:
+    `map_save` up to 30 s, the `.pcd` size-stability wait up to 10 s, then SIGINT of
+    bag/SLAM/driver at up to 8 s each). `StoppingScanOverlay` covers the Active screen with a
+    scrim that **consumes pointer events** — the live 3D view underneath would otherwise read
+    as a still-running scan — plus stage text on the same real sequence, and a `BackHandler`
+    that swallows Back until it resolves.
   (full-screen live preview, HUD: name/elapsed/odom·cloud health/point count/link state,
   **Stop & Save** → summary → optional jump to the notes form).
   - **Power OFF** confirms, then `POST /system/shutdown`; disabled while disconnected or a scan

@@ -64,6 +64,14 @@ object LocalScanStorage {
     fun trajFile(context: Context, scanName: String): File =
         File(scansDir(context), "$scanName.traj")
 
+    /** Local sidecar file a scan's health log (`.jsonl`) is (or would be) stored at. */
+    fun healthFile(context: Context, scanName: String): File =
+        File(scansDir(context), "$scanName.jsonl")
+
+    /** Whether this scan's health log has been downloaded to the phone. */
+    fun hasHealthLog(context: Context, scanName: String): Boolean =
+        healthFile(context, scanName).let { it.exists() && it.length() > 0 }
+
     /** Whether the scan's `.pcd` has been downloaded to this phone. */
     fun isDownloaded(context: Context, scanName: String): Boolean =
         pcdFile(context, scanName).let { it.exists() && it.length() > 0 }
