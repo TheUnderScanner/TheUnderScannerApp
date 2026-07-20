@@ -73,7 +73,10 @@ TOPIC_CLOUD, TOPIC_ODOM = "/cloud_registered", "/Odometry"
 VOXEL    = 0.10     # preview downsample size (m); larger = sparser/lighter
 CLOUD_HZ = 4        # preview cloud frames/sec to the phone
 POSE_HZ  = 10       # pose updates/sec to the phone
-NAME_RE  = re.compile(r"^\d{4}-\d{2}-\d{2}_[A-Za-z0-9\-]+_\d{2}$")
+# \w is Unicode-aware in Python 3, so accented locations (Résidence, Gouffre-d'Été)
+# are accepted. It still excludes "/", "\" and ".", so this remains the path-traversal
+# guard that safe() relies on.
+NAME_RE  = re.compile(r"^\d{4}-\d{2}-\d{2}_[\w\-]+_\d{2}$")
 
 # ---- live preview binary protocol ----
 CLOUD_MAGIC  = b"USC1"          # 4-byte magic; the "1" is the version
@@ -119,6 +122,19 @@ def collect_scan_names():
     if NOTES.is_dir():   names |= {p.stem for p in NOTES.glob("*.json")}
     return sorted(names, reverse=True)
 
+def clean_location(location: str) -> str:
+    """Make a user-typed location safe to embed in a scan name, keeping accents.
+
+    The location becomes part of the scan name, and every read endpoint runs that
+    name through safe()/NAME_RE — so anything not cleaned here produces a scan the
+    API can create but never serve (HTTP 400 on pcd/config/notes). Letters and
+    digits survive as typed ("Résidence" stays "Résidence"); spaces, punctuation
+    and path separators collapse to "-". "_" is folded too since it separates the
+    date/location/run fields.
+    """
+    s = re.sub(r"[\W_]+", "-", location).strip("-")
+    return s or "apartment"
+
 def make_scan_name(location: str | None) -> str:
     date = datetime.date.today().isoformat()
     if not location:                       # sticky: reuse last location
@@ -127,6 +143,7 @@ def make_scan_name(location: str | None) -> str:
             location = "_".join(parts[1:-1]) if len(parts) >= 3 else "apartment"
         else:
             location = "apartment"
+    location = clean_location(location)
     last = 0
     if BAGS.is_dir():
         for p in BAGS.glob(f"{date}_{location}_*"):
