@@ -59,6 +59,8 @@ uninstalls the old version, and installs the new one.
 
 ### The Jetson backend (the contract)
 
+find the UnderScannerAPI/app.py
+
 A FastAPI service runs at `http://<jetson-ip>:8000`. The base URL is editable in the app's
 Settings (the hotspot-assigned IP changes between sessions); default is in
 `SettingsRepository.DEFAULT_BASE_URL`.
