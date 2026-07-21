@@ -1,7 +1,9 @@
 package com.underscanner.theunderscannerapp
 
 import android.widget.Toast
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
+import androidx.compose.foundation.basicMarquee
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -15,14 +17,17 @@ import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.DialogProperties
 import androidx.compose.ui.graphics.Color
 import kotlinx.coroutines.launch
 import org.json.JSONObject
@@ -62,12 +67,18 @@ fun ScanLibraryScreen(
     var notesScan by remember { mutableStateOf<ScanInfo?>(null) }
     var configScan by remember { mutableStateOf<ScanInfo?>(null) }
 
-    // When arriving from a just-finished scan, refresh then open its notes form once.
-    var notesConsumed by remember { mutableStateOf(false) }
-    LaunchedEffect(openNotesFor) {
-        if (!openNotesFor.isNullOrBlank()) viewModel.refresh()
+    // When arriving from a just-finished scan, refresh then open its notes form ONCE.
+    //
+    // This must be rememberSaveable, not remember: navigating to the PCD viewer or the health
+    // charts disposes this composable while its back-stack entry (and its `openNotes` argument)
+    // stays alive, so a plain remember resets to false and the form re-opens on every return.
+    // rememberSaveable is scoped to the NavBackStackEntry, so "already consumed" survives the
+    // round trip, while a genuinely new navigation here creates a fresh entry and re-arms it.
+    var notesConsumed by rememberSaveable { mutableStateOf(false) }
+    LaunchedEffect(openNotesFor, notesConsumed) {
+        if (!openNotesFor.isNullOrBlank() && !notesConsumed) viewModel.refresh()
     }
-    LaunchedEffect(scans, openNotesFor) {
+    LaunchedEffect(scans, openNotesFor, notesConsumed) {
         if (!openNotesFor.isNullOrBlank() && !notesConsumed) {
             scans.firstOrNull { it.name == openNotesFor }?.let {
                 notesScan = it
@@ -457,6 +468,7 @@ private fun ConfigDialog(
 // Notes form
 // ---------------------------------------------------------------------------
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun NotesDialog(
     scan: ScanInfo,
@@ -490,7 +502,40 @@ private fun NotesDialog(
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Notes — ${scan.name}", maxLines = 1, overflow = TextOverflow.Ellipsis) },
+        // Full-width: the default platform dialog width wastes horizontal space that the
+        // free-text fields need.
+        properties = DialogProperties(usePlatformDefaultWidth = false),
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 12.dp),
+        title = {
+            Column(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                Text("Notes", style = MaterialTheme.typography.titleLarge)
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    scan.date,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(Modifier.height(2.dp))
+                // Scan names are long and the dialog is narrow, so scroll rather than
+                // truncate — the run number at the end is the part that disambiguates.
+                Text(
+                    scan.name,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    softWrap = false,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .basicMarquee()
+                )
+            }
+        },
         text = {
             if (loading) {
                 Box(Modifier.fillMaxWidth().padding(24.dp), contentAlignment = Alignment.Center) {

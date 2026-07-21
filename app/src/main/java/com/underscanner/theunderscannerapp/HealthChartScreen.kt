@@ -6,12 +6,16 @@ import android.content.ContextWrapper
 import android.content.pm.ActivityInfo
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.PagerDefaults
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.ChevronLeft
+import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -27,6 +31,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 // ===========================================================================
@@ -209,6 +214,7 @@ private fun ChartPager(log: HealthLog, scanName: String, onBack: () -> Unit) {
     }
 
     val pagerState = rememberPagerState(pageCount = { specs.size })
+    val scope = rememberCoroutineScope()
 
     Column(Modifier.fillMaxSize()) {
         // Header
@@ -241,6 +247,12 @@ private fun ChartPager(log: HealthLog, scanName: String, onBack: () -> Unit) {
 
         HorizontalPager(
             state = pagerState,
+            // Default snap threshold is half a page; on a full-screen-wide page that is a very
+            // long drag, which is what made swiping feel dead. 15% commits the page change.
+            flingBehavior = PagerDefaults.flingBehavior(
+                state = pagerState,
+                snapPositionalThreshold = 0.15f
+            ),
             modifier = Modifier
                 .weight(1f)
                 .fillMaxWidth()
@@ -248,26 +260,46 @@ private fun ChartPager(log: HealthLog, scanName: String, onBack: () -> Unit) {
             ChartPage(spec = specs[page], log = log)
         }
 
-        // Page indicator — which of the charts is showing, and that there are more.
+        // Explicit paging controls. A swipe still works, but on a full-screen-wide page it
+        // needs a long or fast drag to cross the pager's snap threshold, which made it feel
+        // unresponsive — so chart switching does not depend on the gesture at all.
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(bottom = 8.dp, top = 2.dp),
+                .padding(bottom = 6.dp, top = 2.dp),
             horizontalArrangement = Arrangement.Center,
             verticalAlignment = Alignment.CenterVertically
         ) {
+            IconButton(
+                onClick = { scope.launch { pagerState.animateScrollToPage(pagerState.currentPage - 1) } },
+                enabled = pagerState.currentPage > 0,
+                modifier = Modifier.size(40.dp)
+            ) {
+                Icon(Icons.Default.ChevronLeft, contentDescription = "Courbe précédente")
+            }
+
             specs.indices.forEach { i ->
                 val active = i == pagerState.currentPage
+                // Tapping a dot jumps straight to that chart.
                 Box(
                     Modifier
-                        .size(if (active) 8.dp else 6.dp)
+                        .padding(horizontal = 5.dp)
+                        .size(if (active) 9.dp else 7.dp)
                         .background(
                             if (active) MaterialTheme.colorScheme.primary
                             else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.35f),
                             CircleShape
                         )
+                        .clickable { scope.launch { pagerState.animateScrollToPage(i) } }
                 )
-                if (i != specs.lastIndex) Spacer(Modifier.width(6.dp))
+            }
+
+            IconButton(
+                onClick = { scope.launch { pagerState.animateScrollToPage(pagerState.currentPage + 1) } },
+                enabled = pagerState.currentPage < specs.lastIndex,
+                modifier = Modifier.size(40.dp)
+            ) {
+                Icon(Icons.Default.ChevronRight, contentDescription = "Courbe suivante")
             }
         }
     }

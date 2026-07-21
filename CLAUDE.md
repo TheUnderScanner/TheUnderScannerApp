@@ -167,8 +167,13 @@ drawn as a yellow polyline (`Trajectory.kt` + `MyGLRenderer.drawTrajectory`, `GL
   tolerant so `cave-x`/`cave_x`/`cave x` match; scans name/location/date/notes text) and a
   **sort** menu (date / name both directions, plus PCD size and bag size descending; persisted).
   Both are client-side and work offline. Hosts the read-only **Config** dialog and the **Notes**
-  form dialog (`site, issues, free`). Legacy `conditions` / `estimated_length_m` fields are no
+  form dialog (`site, issues, free`; full-width via `usePlatformDefaultWidth = false`, with a
+  centred *Notes / date / scan-name* header, the name marquee-scrolling rather than truncating).
+  Legacy `conditions` / `estimated_length_m` fields are no
   longer shown or written (existing values stay in the Jetson's JSON, just unused).
+  The `openNotes` route argument is consumed once via a **`rememberSaveable`** flag — with a
+  plain `remember`, navigating to the viewer or the charts disposes this composable while the
+  back-stack entry keeps the argument, so returning re-opened the notes form every time.
 
 - **HealthChartScreen.kt** — post-scan health charts, reached from a scan row's timeline icon
   (`onOpenHealth`; the log is fetched on demand if it isn't local yet, then works offline).
@@ -178,7 +183,10 @@ drawn as a yellow polyline (`Trajectory.kt` + `MyGLRenderer.drawTrajectory`, `GL
   height = maxWidth)` — plain `size()` is still bounded by the parent's portrait constraints and
   gets coerced straight back into a portrait-shaped box. One chart fills the screen at a time and
   a `HorizontalPager` swipes between them (gestures rotate with the content, so a swipe reads as
-  horizontal once the phone is turned); dots at the bottom show the position. Pages: temperature /
+  horizontal once the phone is turned). A full-screen-wide page made the default half-page snap
+  threshold a very long drag, so the swipe felt dead: `PagerDefaults.flingBehavior` drops
+  `snapPositionalThreshold` to `0.15f`. The bottom bar also carries **prev/next arrows and
+  tappable dots**, so chart switching never depends on the gesture at all. Pages: temperature /
   load / power / SLAM health, all sharing the same x domain so a feature sits at the same
   horizontal position across a swipe. A page whose series are all absent from the log is dropped
   entirely, and `odom_ok`/`cloud_ok` dropouts render as shaded bands behind the rate lines. All
