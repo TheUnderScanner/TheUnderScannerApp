@@ -385,6 +385,7 @@ fun ActiveScanScreen(
                 MyGLSurfaceView(ctx, liveMode = true).also { view ->
                     view.renderer.previewSource = viewModel.previewCloud
                     view.renderer.trajectorySource = viewModel.trajectory
+                    view.renderer.stats = viewModel.renderStats
                     view.setColorMode(colorMode)
                     view.setReflBounds(reflLow, reflHigh)
                     view.setNoiseFilter(noiseFilter)
@@ -411,7 +412,12 @@ fun ActiveScanScreen(
                     maxLines = 1, overflow = TextOverflow.Ellipsis
                 )
                 Text("⏱ ${formatElapsed(elapsed)}", style = MaterialTheme.typography.bodyMedium)
-                Text("$previewPoints points" + if (viewModel.previewCapped) " (max)" else "",
+                val voxel = viewModel.previewVoxel
+                Text("$previewPoints points" + when {
+                        viewModel.previewCapped -> " (max)"
+                        voxel > 0.11f -> " · voxel %.1f m".format(voxel)
+                        else -> ""
+                    },
                     style = MaterialTheme.typography.bodySmall)
                 Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                     HealthDot("odom", scanStatus?.odomOk == true)

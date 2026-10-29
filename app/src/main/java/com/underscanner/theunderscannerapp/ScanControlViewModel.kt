@@ -9,6 +9,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import org.json.JSONObject
 
 /** UI phase of the active-scan flow. */
 enum class ControlPhase { Idle, Starting, Active, Stopping, Summary }
@@ -76,6 +77,12 @@ class ScanControlViewModel(app: Application) : AndroidViewModel(app) {
 
     @Volatile private var lastFrameAt = 0L
     val previewCapped: Boolean get() = previewCloud.capped
+    val previewVoxel: Float get() = previewCloud.voxelSize
+
+    /** Fed by the live renderer; forwarded into the scan's health log as `ph_*` KPIs. */
+    val renderStats = RenderStats()
+    private var lastStatsAt = 0L
+    private var lastRxBytes = 0L
 
     // --- Shutdown ---
     private val _shuttingDown = mutableStateOf(false)
@@ -172,9 +179,32 @@ class ScanControlViewModel(app: Application) : AndroidViewModel(app) {
             while (isActive) {
                 _previewPoints.value = previewCloud.pointCount
                 _receiving.value = System.currentTimeMillis() - lastFrameAt < 3000
+                maybeSendStats()
                 delay(250)
             }
         }
+    }
+
+    /** Every [RenderStats.WINDOW_MS], report the phone-side KPIs to the backend's health log. */
+    private fun maybeSendStats() {
+        val s = stream ?: return
+        val now = System.currentTimeMillis()
+        if (now - lastStatsAt < RenderStats.WINDOW_MS) return
+        val rx = s.rxBytes
+        val rxKbps = if (lastStatsAt == 0L || rx < lastRxBytes) null
+            else (rx - lastRxBytes) / 1.024f / (now - lastStatsAt)
+        lastStatsAt = now
+        lastRxBytes = rx
+        val o = JSONObject()
+            .put("type", "client_stats")
+            .put("fps", renderStats.fps.toDouble())
+            .put("frame_max_ms", renderStats.frameMaxMs.toDouble())
+            .put("upload_kbps", renderStats.uploadKbps.toDouble())
+            .put("chunks", renderStats.chunks)
+            .put("pts", previewCloud.pointCount)
+            .put("voxel", previewCloud.voxelSize.toDouble())
+        rxKbps?.let { o.put("rx_kbps", it.toDouble()) }
+        s.sendStats(o.toString())
     }
 
     private fun stopPreviewUi() {
@@ -269,6 +299,8 @@ class ScanControlViewModel(app: Application) : AndroidViewModel(app) {
             isRunning = { _scanStatus.value?.running ?: true }
         )
         stream = manager
+        lastStatsAt = 0L
+        lastRxBytes = 0L
         manager.start(viewModelScope)
         startPreviewUi()
     }

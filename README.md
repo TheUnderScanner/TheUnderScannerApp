@@ -11,7 +11,9 @@ An Android app to remotely scan, download, and visualize LiDAR point cloud data.
 - Connect to a remote server hosted on an SBC which is plugged to the LiDAR (cf [TheUnderScannerServer Repo](https://github.com/UnderScanner/TheUnderScannerServer))
 - Look into local and remote scans folder
 - Download `.pcd` (point cloud) scan files with progress tracking
-- Homemade 3D viewer: View `.pcd` file with with OpenGL
+- Homemade 3D viewer: View `.pcd` file with OpenGL (chunked VBOs, intensity / height / tag coloring, LiDAR trajectory)
+- Start / stop a scan and watch the map build live (WebSocket preview, accumulated on the phone)
+- Per-scan health charts: Jetson temperature / load / power / SLAM rates, plus live-view rendering and WiFi KPIs
 - Clean UI
 
 ## Project Structure
@@ -30,7 +32,7 @@ An Android app to remotely scan, download, and visualize LiDAR point cloud data.
 
 This is a work-in-progress project.
 
-Next step is to implement real time duplex communication to view map creation during scanning process.
+See `CLAUDE.md` for the architecture, the Jetson API contract and the known TODOs.
 
 ---
 

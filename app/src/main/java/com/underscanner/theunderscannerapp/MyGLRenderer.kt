@@ -34,12 +34,18 @@ class MyGLRenderer(
 
     // Interleaved 16-byte-per-point vertex data (file mode): xyz float32 + reflectivity/tag/
     // line/reserved bytes — same layout as PreviewCloud, so the draw path is identical for
-    // saved files and the live preview. [vertexPosView] is a float view over the same memory
-    // used for the position attribute; [vertexByteBuffer] serves the packed byte attributes.
+    // saved files and the live preview. Kept on the CPU after upload: the GL context (and the
+    // VBOs) is lost on every pause, and this is what [chunks] re-uploads from.
     private lateinit var vertexByteBuffer: ByteBuffer
-    private lateinit var vertexPosView: FloatBuffer
     private var program = 0
     private var pointCount: Int = 0
+
+    // GPU copy of the active cloud (file buffer or live preview), in fixed-size VBOs.
+    private val chunks = PointChunks()
+
+    /** Render KPIs sink (live mode), forwarded into the scan's health log. */
+    @Volatile
+    var stats: RenderStats? = null
 
     // ----------------------------
     // Coloring / filtering state (set from the UI via MyGLSurfaceView.queueEvent)
@@ -122,13 +128,11 @@ class MyGLRenderer(
     init {
         if (liveMode) {
             vertexByteBuffer = ByteBuffer.allocateDirect(0).order(ByteOrder.nativeOrder())
-            vertexPosView = vertexByteBuffer.asFloatBuffer()
             pointCount = 0
             camera.distance = 12f
         } else {
             val parsed = parsePCD(context)
             vertexByteBuffer = parsed.first
-            vertexPosView = vertexByteBuffer.asFloatBuffer()
             pointCount = parsed.second
             Log.d("PCD", "Loaded $pointCount points from $fileName")
             if (hasBounds) {
@@ -147,6 +151,9 @@ class MyGLRenderer(
     override fun onSurfaceCreated(gl: GL10?, config: EGLConfig?) {
         GLES20.glClearColor(0f, 0f, 0f, 1f)
         GLES20.glEnable(GLES20.GL_DEPTH_TEST)
+
+        // A new context means every VBO is gone: re-upload from the CPU copy on next draw.
+        chunks.invalidate()
 
         circleXY = CircleGeometry.generateCircle(1.0f, circleSegmentCount, "XY")
         circleYZ = CircleGeometry.generateCircle(1.0f, circleSegmentCount, "YZ")
@@ -196,20 +203,15 @@ class MyGLRenderer(
         GLES20.glUniformMatrix4fv(mvpHandle, 1, false, mvpMatrix, 0)
 
         // --- Render the point cloud (file buffer, or the live preview when streaming) ---
-        // Both sources are interleaved 16-byte records: position = 3 floats at offset 0,
-        // packed attributes = 4 normalized bytes at offset 12, stride 16 (zero-copy).
+        // Both sources are interleaved 16-byte records, uploaded into chunked VBOs before any
+        // draw this frame (batching updates ahead of draws is what Mali drivers want). A file
+        // uploads once; the live cloud only sends what was appended since the last frame, and
+        // its lock guarantees we never upload a half-compacted buffer.
         val source = previewSource
-        val posBuf: FloatBuffer
-        val attrBuf: ByteBuffer
-        val drawCount: Int
         if (source != null) {
-            posBuf = source.floatBuffer
-            attrBuf = source.byteBuffer
-            drawCount = source.pointCount
+            synchronized(source) { chunks.sync(source.byteBuffer, source.pointCount, source.generation) }
         } else {
-            posBuf = vertexPosView
-            attrBuf = vertexByteBuffer
-            drawCount = pointCount
+            chunks.sync(vertexByteBuffer, pointCount, 0L)
         }
 
         // Coloring / filtering uniforms (mapping happens in the shader from the packed attribs).
@@ -226,16 +228,8 @@ class MyGLRenderer(
         val posHandle = GLES20.glGetAttribLocation(program, "a_Position")
         val attrHandle = GLES20.glGetAttribLocation(program, "a_Attribs")
         GLES20.glEnableVertexAttribArray(posHandle)
-        posBuf.position(0)
-        GLES20.glVertexAttribPointer(posHandle, 3, GLES20.GL_FLOAT, false, PreviewCloud.STRIDE, posBuf)
-        if (attrHandle >= 0) {
-            GLES20.glEnableVertexAttribArray(attrHandle)
-            attrBuf.position(12)
-            GLES20.glVertexAttribPointer(
-                attrHandle, 4, GLES20.GL_UNSIGNED_BYTE, true, PreviewCloud.STRIDE, attrBuf
-            )
-        }
-        GLES20.glDrawArrays(GLES20.GL_POINTS, 0, drawCount)
+        if (attrHandle >= 0) GLES20.glEnableVertexAttribArray(attrHandle)
+        chunks.draw(posHandle, attrHandle)
         GLES20.glDisableVertexAttribArray(posHandle)
         if (attrHandle >= 0) GLES20.glDisableVertexAttribArray(attrHandle)
 
@@ -265,6 +259,8 @@ class MyGLRenderer(
             lastReportedStep = step
             if (!firstFrame) onScaleChanged?.invoke(step)
         }
+
+        stats?.record(now, chunks.bytesUploaded, chunks.chunks)
     }
 
     private fun pivotMoved(): Boolean {

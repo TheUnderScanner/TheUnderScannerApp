@@ -2,7 +2,6 @@ package com.underscanner.theunderscannerapp
 
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
-import java.nio.FloatBuffer
 import kotlin.math.floor
 
 /**
@@ -10,36 +9,46 @@ import kotlin.math.floor
  *
  * The WebSocket stream sends per-frame world-frame points, not the whole map, so we
  * accumulate them here. To stay renderable on a phone over a multi-minute scan we
- * voxel-dedup (hash to a [voxelSize] grid) and cap the total point count.
+ * voxel-dedup (hash to a [voxelSize] grid) and cap the total point count. When the cap is
+ * reached the cloud is *coarsened* in place (voxel size doubled, buffer re-deduped and
+ * compacted) so new areas keep appearing instead of the preview silently freezing.
  *
  * Memory model: a single direct [ByteBuffer] of 16-byte interleaved records is pre-allocated
  * to [capacity] points. Each record is `xyz` (3× float32) followed by 4 bytes
- * (reflectivity, tag, line, reserved) — the exact `USC1` wire layout, so the GL thread can
- * bind it as a zero-copy interleaved vertex array (position at offset 0, attributes at 12,
- * stride 16). The producer (WebSocket thread) appends via *absolute* puts into region
- * `[pointCount, newCount)` and then publishes [pointCount] (volatile). The GL thread reads
- * region `[0, pointCount)` — disjoint from in-flight writes — with no locking.
+ * (reflectivity, tag, line, reserved) — the exact `USC1` wire layout, which [PointChunks]
+ * uploads verbatim into its VBOs (position at offset 0, attributes at 12, stride 16). The
+ * producer (WebSocket thread) appends via *absolute* puts into region `[pointCount,
+ * newCount)` and then publishes [pointCount]. Every mutation holds this object's monitor,
+ * and so does the GL thread while it uploads, so an upload never sees a half-compacted
+ * buffer; [generation] tells it when `[0, pointCount)` was rewritten and must be re-sent.
  */
 class PreviewCloud(
-    val capacity: Int = 500_000,
-    val voxelSize: Float = 0.1f
+    val capacity: Int = 3_000_000,
+    private val initialVoxelSize: Float = 0.1f
 ) {
     private val backing: ByteBuffer =
         ByteBuffer.allocateDirect(capacity * STRIDE).order(ByteOrder.nativeOrder())
 
-    /** Interleaved 16-byte records. Position kept at 0; writes are absolute. Read by GL. */
+    /** Interleaved 16-byte records; writes are absolute. Uploaded to the GPU by [PointChunks]. */
     val byteBuffer: ByteBuffer = backing
-
-    /** Float view over [byteBuffer] for the position attribute (GL applies the 16-byte stride). */
-    val floatBuffer: FloatBuffer = backing.asFloatBuffer()
 
     @Volatile
     var pointCount: Int = 0
         private set
 
-    /** True once [capacity] is reached and new voxels are being dropped. */
+    /** Bumped whenever existing records are rewritten in place ([coarsen], [clear]). */
+    @Volatile
+    var generation: Long = 0
+        private set
+
+    /** True only once even [MAX_VOXEL] can't make room and new voxels are being dropped. */
     @Volatile
     var capped: Boolean = false
+        private set
+
+    /** Current dedup grid (m); doubles each time the cloud is coarsened. */
+    @Volatile
+    var voxelSize: Float = initialVoxelSize
         private set
 
     // Running world bounds over kept points (published after pointCount for the GL thread).
@@ -57,8 +66,8 @@ class PreviewCloud(
         private set
 
     // Occupied voxels, to deduplicate. Only touched by the single producer thread.
-    private val voxels = HashSet<Long>(1 shl 20)
-    private val invVoxel = 1f / voxelSize
+    private val voxels = LongHashSet(1 shl 20)
+    private var invVoxel = 1f / voxelSize
 
     /**
      * Add a decoded frame: [src] is positioned at the first of [n] 16-byte records
@@ -76,7 +85,10 @@ class PreviewCloud(
         var mxz = if (count > 0) maxZ else -Float.MAX_VALUE
 
         for (i in 0 until n) {
-            if (count >= capacity) { capped = true; break }
+            if (count >= capacity) {
+                count = coarsen(count)
+                if (count >= capacity) { capped = true; break }
+            }
             val x = src.float
             val y = src.float
             val z = src.float
@@ -111,9 +123,46 @@ class PreviewCloud(
     fun clear() {
         voxels.clear()
         capped = false
+        voxelSize = initialVoxelSize
+        invVoxel = 1f / voxelSize
         minX = 0f; minY = 0f; minZ = 0f
         maxX = 0f; maxY = 0f; maxZ = 0f
         pointCount = 0
+        generation++
+    }
+
+    /**
+     * Double the voxel size until the first [count] records fit in [COARSEN_TARGET] of
+     * [capacity], keeping one record per coarse voxel and compacting them to the front.
+     * Runs under the monitor (from [addFrame]), so no upload is in flight; bumping
+     * [generation] makes the GL thread re-send the compacted buffer. Returns the new count
+     * (also published to [pointCount]).
+     */
+    private fun coarsen(count: Int): Int {
+        var n = count
+        while (n > capacity * COARSEN_TARGET && voxelSize < MAX_VOXEL) {
+            generation++
+            voxelSize *= 2f
+            invVoxel = 1f / voxelSize
+            voxels.clear()
+            var kept = 0
+            for (i in 0 until n) {
+                val o = i * STRIDE
+                val key = voxelKey(backing.getFloat(o), backing.getFloat(o + 4), backing.getFloat(o + 8))
+                if (voxels.add(key)) {
+                    if (kept != i) {
+                        // Raw 16-byte record copy (same buffer, same byte order).
+                        val d = kept * STRIDE
+                        backing.putLong(d, backing.getLong(o))
+                        backing.putLong(d + 8, backing.getLong(o + 8))
+                    }
+                    kept++
+                }
+            }
+            n = kept
+        }
+        pointCount = n
+        return n
     }
 
     private fun voxelKey(x: Float, y: Float, z: Float): Long {
@@ -127,5 +176,11 @@ class PreviewCloud(
     companion object {
         /** Bytes per interleaved point record: xyz (3× float32) + 4 attribute bytes. */
         const val STRIDE = 16
+
+        /** After coarsening, the cloud should occupy at most this fraction of [capacity]. */
+        private const val COARSEN_TARGET = 0.6f
+
+        /** Coarsest preview grid (m); past this, new voxels are dropped ([capped]). */
+        private const val MAX_VOXEL = 1.6f
     }
 }

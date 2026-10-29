@@ -36,6 +36,10 @@ Notes:
     and line will be 0 unless your FAST-LIO fork forwards them. The backend
     logs the fields it actually sees on the first cloud (see PreviewNode).
   * Pose messages are still sent as JSON text (unchanged).
+  * Right after connect the server sends {"type":"hello","accepts":["client_stats"]}.
+    Only then may the client send {"type":"client_stats",...} text messages (phone
+    render KPIs → ph_* keys of the health log, see below). An older server never
+    read the socket, so a client must stay silent without the hello.
   * GET /preview/format returns this layout as JSON for the client to verify.
 
 ------------------------------------------------------------------------------
@@ -50,7 +54,16 @@ JSON Lines. Line 1 is a header, every following line is one sample:
      "t_cpu":52.1,"t_gpu":51.0,"t_soc":50.5,"t_tj":52.5,
      "w_in":8.21,"w_cpu_gpu":3.10,"w_soc":1.22,"disk_free":186.2,
      "cloud_hz":9.8,"odom_hz":10.1,"odom_ok":true,"cloud_ok":true,
-     "pts":4210,"traj_n":812}
+     "pts":4210,"pts_raw":19840,"traj_n":812,
+     "ws_clients":1,"ws_kbps":262.4,"ws_send_ms":1.8,
+     "ph_fps":59.8,"ph_frame_max_ms":33.0,"ph_upload_kbps":210.5,"ph_rx_kbps":258.0,
+     "ph_chunks":12,"ph_pts":781234,"ph_voxel":0.1}
+
+  * ws_* is the preview link as the Jetson sees it (ws_send_ms = slowest cloud send
+    in the sample window; a climbing value is WiFi back-pressure). ph_* are the phone's
+    own render KPIs, sent as {"type":"client_stats",...} on /ws/preview after the
+    server's {"type":"hello","accepts":["client_stats"]}; absent when no phone is
+    watching the live view.
 
   * "t" is seconds since the scan started; one sample every HEALTH_WRITE_S.
   * EVERY field except "t" is optional — a key is absent when the board doesn't
@@ -241,7 +254,21 @@ class State:
         self.cloud_count = 0
         self.odom_count = 0
         self.last_cloud_pts = 0      # points in the most recent (downsampled) frame
+        self.last_cloud_raw = 0      # points in that frame before the preview voxel filter
+        # Preview link KPIs: bytes pushed over /ws/preview (monotonic, diffed into kB/s)
+        # and the slowest single cloud send since the last sample — a send that blocks is
+        # TCP back-pressure, i.e. the WiFi can't keep up.
+        self.ws_bytes = 0
+        self.ws_send_ms_max = 0.0
+        # Latest phone-side render KPIs, sent by the app as "client_stats" on the socket.
+        self.client_stats: dict = {}
+        self.client_stats_t = 0.0
 S = State()
+
+# Phone KPIs accepted from "client_stats" messages; logged as ph_<key>. Whitelisted so a
+# client can't write arbitrary keys into the health log.
+CLIENT_STATS_KEYS = ("fps", "frame_max_ms", "upload_kbps", "rx_kbps", "chunks", "pts", "voxel")
+CLIENT_STATS_MAX_AGE = 5.0   # s; older than this and the phone is considered gone
 
 # ----------------------------- system health -----------------------------
 def _read(p, default=None):
@@ -275,7 +302,8 @@ class HealthMonitor:
         self.lock = threading.Lock()
         self.latest: dict = {}
         self._prev_cpu = None            # (busy, total) jiffies
-        self._prev_counts = (0, 0, 0.0)  # (cloud_count, odom_count, t)
+        self._prev_counts = (0, 0, 0, 0.0)  # (cloud_count, odom_count, ws_bytes, t)
+        self._send_ms_acc = 0.0             # worst ws send since the last log line
         self._fh = None
         self._start = 0.0
         self._last_write = 0.0
@@ -383,17 +411,33 @@ class HealthMonitor:
             pass
 
         with S.lock:
-            cc, oc = S.cloud_count, S.odom_count
+            cc, oc, wb = S.cloud_count, S.odom_count, S.ws_bytes
             d["pts"] = S.last_cloud_pts
+            d["pts_raw"] = S.last_cloud_raw
             d["traj_n"] = len(S.trajectory)
             d["odom_ok"] = (now - S.last_odom_t) < 2.0
             d["cloud_ok"] = (now - S.last_cloud_t) < 2.0
-        pc, po, pt = self._prev_counts
+            send_ms, S.ws_send_ms_max = S.ws_send_ms_max, 0.0
+            cs = S.client_stats if (now - S.client_stats_t) < CLIENT_STATS_MAX_AGE else {}
+        # Link KPIs only while a phone is watching, so scans without a live view don't
+        # grow flat-zero charts.
+        watching = len(clients) > 0
+        d["ws_clients"] = len(clients)
+        # Hold the max across samples until it is logged, so a 5 s log line reports the
+        # worst send of its whole interval, not just of the last 1 s sample.
+        self._send_ms_acc = max(self._send_ms_acc, send_ms) if self._fh else send_ms
+        if watching:
+            d["ws_send_ms"] = round(self._send_ms_acc, 1)
+        for k, v in cs.items():
+            d[f"ph_{k}"] = v
+        pc, po, pw, pt = self._prev_counts
         dt = now - pt
         if pt and dt > 0:
             d["cloud_hz"] = round((cc - pc) / dt, 1)
             d["odom_hz"] = round((oc - po) / dt, 1)
-        self._prev_counts = (cc, oc, now)
+            if watching:
+                d["ws_kbps"] = round((wb - pw) / 1024 / dt, 1)
+        self._prev_counts = (cc, oc, wb, now)
         return d
 
     # ---- per-scan log ----
@@ -429,6 +473,7 @@ class HealthMonitor:
         if not self._fh or (now - self._last_write) < HEALTH_WRITE_S:
             return
         self._last_write = now
+        self._send_ms_acc = 0.0
         rec = {"t": round(now - self._start, 1)}
         rec.update({k: v for k, v in snap.items() if v is not None})
         try:
@@ -490,6 +535,7 @@ class PreviewNode(Node):
             S.last_cloud_t = time.time()
             S.cloud_count += 1
             S.last_cloud_pts = int(len(idx))
+            S.last_cloud_raw = int(n)
 
     def on_odom(self, msg):
         p, q = msg.pose.pose.position, msg.pose.pose.orientation
@@ -747,12 +793,38 @@ def system_shutdown():
 # ====================== LIVE PREVIEW WEBSOCKET ======================
 clients: set[WebSocket] = set()
 
+def _accept_client_stats(raw: str):
+    """Store a phone "client_stats" message (whitelisted numeric keys only)."""
+    try:
+        o = json.loads(raw)
+    except ValueError:
+        return
+    if not isinstance(o, dict) or o.get("type") != "client_stats":
+        return
+    stats = {}
+    for k in CLIENT_STATS_KEYS:
+        v = o.get(k)
+        if isinstance(v, (int, float)) and not isinstance(v, bool) and v == v:   # v == v: not NaN
+            stats[k] = round(float(v), 3)
+    with S.lock:
+        S.client_stats, S.client_stats_t = stats, time.time()
+
 @app.websocket("/ws/preview")
 async def ws_preview(ws: WebSocket):
-    await ws.accept(); clients.add(ws)
+    await ws.accept()
     try:
-        while True: await asyncio.sleep(3600)              # broadcaster does the sending
-    except WebSocketDisconnect:
+        # Tell the app it may send its render KPIs. Clients only talk once invited: an
+        # older backend never read this socket, so unsolicited messages would pile up.
+        # Sent before joining `clients` so it can't race a broadcaster send.
+        await ws.send_text(json.dumps({"type": "hello", "accepts": ["client_stats"]}))
+        clients.add(ws)
+        while True:                                  # broadcaster does the sending;
+            msg = await ws.receive()                  # we only drain what the phone sends
+            if msg["type"] == "websocket.disconnect":
+                break
+            if msg.get("text"):
+                _accept_client_stats(msg["text"])
+    except (WebSocketDisconnect, RuntimeError):
         pass
     finally:
         clients.discard(ws)
@@ -766,16 +838,24 @@ async def broadcaster():
         now = time.time()
         with S.lock:
             pose, cloud = S.latest_pose, S.latest_cloud
+        sent = 0
         if pose and pose["t"] != last_pose_t:
             last_pose_t = pose["t"]; txt = json.dumps(pose)
             for ws in list(clients):
-                try: await ws.send_text(txt)
+                try: await ws.send_text(txt); sent += len(txt)
                 except Exception: clients.discard(ws)
+        slowest = 0.0
         if cloud and (now - last_cloud_send) >= cloud_interval:
             last_cloud_send = now
             for ws in list(clients):
-                try: await ws.send_bytes(cloud)
+                t0 = time.perf_counter()
+                try: await ws.send_bytes(cloud); sent += len(cloud)
                 except Exception: clients.discard(ws)
+                slowest = max(slowest, (time.perf_counter() - t0) * 1000)
+        if sent or slowest:
+            with S.lock:
+                S.ws_bytes += sent
+                S.ws_send_ms_max = max(S.ws_send_ms_max, slowest)
 
 @app.on_event("startup")
 async def _startup():

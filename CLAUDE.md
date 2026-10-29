@@ -79,7 +79,7 @@ Settings (the hotspot-assigned IP changes between sessions); default is in
 | POST | `/scan/start` | Start a scan; body `{location}` | `{scan, running, started_at}`; **409** if running |
 | POST | `/scan/stop` | Stop + save | `{scan, running:false, pcd, bag}`; **409** if none |
 | GET | `/scan/status` | Poll scan state | `{running, scan, started_at, elapsed_s, odom_ok, cloud_ok}` |
-| WS | `/ws/preview` | Live preview stream | binary cloud frames + JSON pose |
+| WS | `/ws/preview` | Live preview stream | binary cloud frames + JSON pose / `hello`; client → `client_stats` |
 | POST | `/system/shutdown` | Power the Jetson off | `{ok}`; **409** if a scan is running |
 
 **System health (`HealthMonitor` in `app.py`):** the backend samples Jetson load/thermal/power
@@ -96,6 +96,14 @@ open for the whole scan so append cost never grows with scan length. Bag size is
 *not* logged (`dir_size()` walks the directory); `disk_free` via `statvfs` is the O(1) proxy.
 App side: `SystemHealth` (live) and `HealthLog`/`HealthSample` (parsed log) in `ScanModels.kt`
 address series by backend key, so a new metric charts without an app change.
+**Preview-link + phone KPIs** are logged too: `pts_raw` (cloud points before the preview voxel
+filter), `ws_clients`, `ws_kbps`, `ws_send_ms` (slowest cloud send in the log interval — rising =
+WiFi back-pressure; both only while a phone watches), and `ph_*` = the phone's own render KPIs
+(`fps`, `frame_max_ms`, `upload_kbps`, `rx_kbps`, `chunks`, `pts`, `voxel`). The phone sends
+those as `{"type":"client_stats",...}` text on `/ws/preview` **only after** the server's
+`{"type":"hello","accepts":["client_stats"]}` — an older backend never reads the socket, so
+unsolicited messages would fill its receive queue and stall the connection. Keys are whitelisted
+server-side (`CLIENT_STATS_KEYS`).
 
 `ScanInfo` carries `name, date, location, run` plus artifact sub-objects `bag`, `pcd`
 (`{present, size_bytes, size_human}`), `config`, and `notes` (`{present, ...}`). For search,
@@ -108,10 +116,12 @@ an 8-byte header — 4-byte ASCII magic `"USC1"` (version tag; a frame that does
 it is dropped) + `uint32` point_count — then point_count **16-byte interleaved records**:
 `x,y,z` float32 (offsets 0/4/8) then `reflectivity, tag, line, reserved` uint8 (offsets 12–15).
 World frame, accumulate. The 16-byte stride is 4-aligned so the 4 trailing bytes bind directly
-as a normalized `GL_UNSIGNED_BYTE` vec4 attribute (zero-copy). `tag` is bit-packed Livox noise
+as a normalized `GL_UNSIGNED_BYTE` vec4 attribute (records are uploaded verbatim into VBOs). `tag` is bit-packed Livox noise
 info (bits 1-0 spatial, bits 3-2 return-intensity; 0/1/2/3 = normal/high/medium/low-confidence
 noise) and is often all-zero with the current FAST-LIO (harmless). Text message = JSON pose
-`{type:"pose", x, y, z, ...}` (~10 Hz). `GET /preview/format` also returns this layout as JSON
+`{type:"pose", x, y, z, ...}` (~10 Hz), plus one `{type:"hello", accepts:["client_stats"]}` right
+after connect. The socket is otherwise server → phone; the only client → server message is
+`client_stats` (every 2 s, only once invited by `hello` — see System health). `GET /preview/format` also returns this layout as JSON
 (not consumed by the app; the binary layout above is authoritative).
 
 **Trajectory `UTR1` (LiDAR path):** the backend records `/Odometry` positions (min-step dedup)
@@ -187,7 +197,8 @@ drawn as a yellow polyline (`Trajectory.kt` + `MyGLRenderer.drawTrajectory`, `GL
   threshold a very long drag, so the swipe felt dead: `PagerDefaults.flingBehavior` drops
   `snapPositionalThreshold` to `0.15f`. The bottom bar also carries **prev/next arrows and
   tappable dots**, so chart switching never depends on the gesture at all. Pages: temperature /
-  load / power / SLAM health, all sharing the same x domain so a feature sits at the same
+  load / power / SLAM health, then the live-view pages (phone fps / worst frame / preview points
+  with a voxel-step footer / preview data rates / WiFi send time), all sharing the same x domain so a feature sits at the same
   horizontal position across a swipe. A page whose series are all absent from the log is dropped
   entirely, and `odom_ok`/`cloud_ok` dropouts render as shaded bands behind the rate lines. All
   axis text is composed with `Text`, never measured inside the Canvas.
@@ -254,10 +265,12 @@ drawn as a yellow polyline (`Trajectory.kt` + `MyGLRenderer.drawTrajectory`, `GL
   `PreviewCloud` directly.
 - **PreviewCloud.kt** — accumulates streamed frames into one pre-allocated direct `ByteBuffer`
   of **16-byte interleaved records** (xyz float + reflectivity/tag/line/reserved bytes — the
-  `USC1` layout), with voxel dedup (0.1 m) and a point cap, so a long scan stays renderable.
-  Producer appends with absolute puts (carrying all four attribute bytes through the dedup) and
-  tracks running world bounds; the GL thread reads `[0, pointCount)` lock-free via a float view
-  (positions) + the byte buffer (attributes).
+  `USC1` layout), with voxel dedup (0.1 m, `LongHashSet` — primitive open addressing, 8 B/slot
+  instead of ~60 B for a boxed `HashSet<Long>`) and a 3M point cap, so a long scan stays
+  renderable. At the cap it **coarsens in place** (see TODOs). Producer appends with absolute
+  puts and tracks running world bounds; every mutation holds the object's monitor, and the GL
+  thread takes the same monitor while uploading. `generation` is bumped whenever `[0, pointCount)`
+  is rewritten (`coarsen`/`clear`) so the GL side knows to re-upload everything.
 - **PreviewStreamManager.kt** — owns the `/ws/preview` WebSocket: validates the `USC1` magic and
   decodes frames off the main thread (handing the record block straight to `PreviewCloud`),
   applies pose, and auto-reconnects with backoff while `/scan/status` says a scan is running.
@@ -269,8 +282,20 @@ drawn as a yellow polyline (`Trajectory.kt` + `MyGLRenderer.drawTrajectory`, `GL
 #### OpenGL viewer + orbit camera
 - **MyGLSurfaceView.kt / MyGLRenderer.kt** — OpenGL ES 2.0 point-cloud renderer (depth-tested
   `GL_POINTS`). Both the saved-file buffer and the live `PreviewCloud` are **interleaved 16-byte
-  records** drawn zero-copy: `a_Position` = 3 floats at offset 0, `a_Attribs` = 4 normalized
-  `GL_UNSIGNED_BYTE` at offset 12, stride 16. The PCD parser reads a binary `.pcd` (8 floats/pt;
+  records**: `a_Position` = 3 floats at offset 0, `a_Attribs` = 4 normalized `GL_UNSIGNED_BYTE`
+  at offset 12, stride 16. They are drawn from **chunked VBOs** (`PointChunks.kt`, 65 536 points
+  = 1 MB per VBO), not client-side arrays: full chunks are never touched again, only the tail
+  chunk takes new points. One big VBO would be wrong on Mali (Pixel 8 = Mali-G715): a partial
+  `glBufferSubData` on a buffer still in flight copy-on-writes ("ghosts") the *whole* buffer.
+  Uploads happen before any draw in the frame (Mali prefers updates batched ahead of draws).
+  The CPU copy is kept: `GLSurfaceView` doesn't preserve the EGL context on pause, so
+  `onSurfaceCreated` calls `chunks.invalidate()` and everything re-uploads. `PointChunks.draw`
+  unbinds `GL_ARRAY_BUFFER` after — the overlays (circles, ruler, trajectory) still use client
+  arrays, where a bound VBO would turn their pointers into offsets. The renderer also feeds
+  `RenderStats` (fps, worst frame, upload rate), forwarded into the health log as `ph_*`.
+  **Loop-closure SLAM** (not FAST-LIO today) would need either a backend `reset` + corrected map
+  (→ `clear()` → full re-upload, works as is) or chunks aligned to SLAM submaps with a per-chunk
+  model matrix (a correction = updating matrices, no re-upload). The PCD parser reads a binary `.pcd` (8 floats/pt;
   the 4th float = Livox intensity → the reflectivity byte, tag/line = 0) and computes the cloud's
   bounding box for Frame-All. **Coloring** (`ColorMode` uniform `u_ColorMode`) and the **tag noise
   filter** (`u_NoiseFilter`, discard in the fragment shader) are done entirely in the shaders from
@@ -352,6 +377,12 @@ the Jetson; re-entering reconnects; a dropped socket auto-reconnects with backof
   enum/shader branch exist but the button is hidden — it currently renders as a gradient around
   the pivot, which is wrong); and persisting `tag` into the saved `.pcd` (the saved file carries
   reflectivity but not tag/line).
-- When the preview hits its point cap it stops adding new voxels — consider coarsening or
-  dropping oldest instead.
+- When the preview hits its 3M point cap, `PreviewCloud` **coarsens in place** (voxel size
+  doubled, re-dedup + compaction, down to ~60 % of the cap; HUD shows `· voxel X m`). Before
+  this the cap silently froze the cloud mid-scan while the pose/trajectory kept moving. Only
+  past a 1.6 m voxel does it drop new voxels (`(max)`). Observed growth ≈ 3 000 new 0.1 m
+  voxels/s (1M reached in ~5–6 min). The 3M cap is untested on-device: check the `ph_fps` /
+  `ph_frame_max_ms` charts after a long scan, and drop `capacity` to 2M if they sag.
+- Possible follow-up: per-chunk bounding boxes → frustum culling (temporal chunks are
+  spatially compact when walking a cave).
 - An offline notes-edit queue (editing currently requires a connection).

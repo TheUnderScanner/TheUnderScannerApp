@@ -34,6 +34,20 @@ class PreviewStreamManager(
     @Volatile private var stopped = false
     private var attempt = 0
 
+    /** Running total of bytes received on the socket (for the `ph_rx_kbps` KPI). */
+    @Volatile var rxBytes = 0L
+        private set
+
+    // Set once the backend's `hello` says it reads client stats. An older backend never
+    // reads the socket: its receive queue would fill, stall the connection's ping handling
+    // and get the socket killed — so we stay silent unless invited.
+    @Volatile private var statsAccepted = false
+
+    /** Send a `client_stats` JSON message, if the backend accepts them. */
+    fun sendStats(json: String) {
+        if (statsAccepted) ws?.send(json)
+    }
+
     fun start(scope: CoroutineScope) {
         stopped = false
         attempt = 0
@@ -55,16 +69,19 @@ class PreviewStreamManager(
         ws = client.openPreviewSocket(object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
                 attempt = 0
+                statsAccepted = false
                 onState(PreviewLinkState.Connected)
             }
 
             override fun onMessage(webSocket: WebSocket, bytes: ByteString) {
+                rxBytes += bytes.size
                 decodeFrame(bytes)
                 onFrame()
             }
 
             override fun onMessage(webSocket: WebSocket, text: String) {
-                decodePose(text)
+                rxBytes += text.length
+                decodeText(text)
             }
 
             override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
@@ -132,15 +149,17 @@ class PreviewStreamManager(
         private const val RECORD_SIZE = 16
     }
 
-    private fun decodePose(text: String) {
+    private fun decodeText(text: String) {
         try {
             val o = JSONObject(text)
-            if (o.optString("type") == "pose") {
-                onPose(
+            when (o.optString("type")) {
+                "pose" -> onPose(
                     o.optDouble("x", 0.0).toFloat(),
                     o.optDouble("y", 0.0).toFloat(),
                     o.optDouble("z", 0.0).toFloat()
                 )
+                "hello" -> statsAccepted = o.optJSONArray("accepts")
+                    ?.let { a -> (0 until a.length()).any { a.optString(it) == "client_stats" } } == true
             }
         } catch (_: Exception) {
             // Ignore malformed text frames.

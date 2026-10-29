@@ -202,6 +202,37 @@ private fun ChartPager(log: HealthLog, scanName: String, onBack: () -> Unit) {
                 ),
                 bands = log.falseSpans("odom_ok") + log.falseSpans("cloud_ok")
             ),
+            // Phone-side pages (ph_*): only present when the live view was open.
+            ChartSpec(
+                title = "Rendu téléphone",
+                unit = "img/s",
+                series = listOf(ChartSeries("ph_fps", "Images/s")),
+            ),
+            ChartSpec(
+                title = "Pire image",
+                unit = "ms",
+                series = listOf(ChartSeries("ph_frame_max_ms", "Intervalle max")),
+            ),
+            ChartSpec(
+                title = "Aperçu live",
+                unit = "k points",
+                series = listOf(ChartSeries("ph_pts", "Nuage téléphone") { it / 1000f }),
+                footer = voxelSummary(log)
+            ),
+            ChartSpec(
+                title = "Débits aperçu",
+                unit = "kB/s",
+                series = listOf(
+                    ChartSeries("ws_kbps", "Envoyé (Jetson)"),
+                    ChartSeries("ph_rx_kbps", "Reçu (téléphone)"),
+                    ChartSeries("ph_upload_kbps", "Vers GPU"),
+                ),
+            ),
+            ChartSpec(
+                title = "Envoi WiFi",
+                unit = "ms",
+                series = listOf(ChartSeries("ws_send_ms", "Envoi nuage le plus lent")),
+            ),
         ).mapNotNull { spec ->
             spec.series.filter { log.has(it.key) }.takeIf { it.isNotEmpty() }
                 ?.let { spec.copy(series = it) }
@@ -320,6 +351,19 @@ private fun energySummary(log: HealthLog): String? {
     val span = pts.last().first - pts.first().first
     if (span <= 0f) return null
     return "Moyenne %.1f W · %.1f Wh consommés".format(joules / span, joules / 3600f)
+}
+
+/** When the live preview coarsened (voxel size steps), e.g. "Voxel 0.1 m → 0.2 m à 5:42". */
+private fun voxelSummary(log: HealthLog): String? {
+    val pts = log.series("ph_voxel")
+    if (pts.isEmpty()) return null
+    val steps = mutableListOf("Voxel %.1f m".format(pts.first().second))
+    for (i in 1 until pts.size) {
+        if (pts[i].second > pts[i - 1].second * 1.01f) {
+            steps += "→ %.1f m à %s".format(pts[i].second, formatT(pts[i].first))
+        }
+    }
+    return steps.joinToString(" ")
 }
 
 /**
