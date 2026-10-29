@@ -1,9 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <network-security-config>
     <!--
-      The Jetson is reached over plain HTTP on the WiFi hotspot, and its IP
-      changes between sessions (editable in the app's Settings). Allow cleartext
-      to any host for this development app.
+      The Jetson is reached over plain HTTP on its own WiFi access point
+      (10.42.0.1, editable in the app's Settings). Allow cleartext to any host
+      for this development app.
     -->
     <base-config cleartextTrafficPermitted="true" />
 </network-security-config>

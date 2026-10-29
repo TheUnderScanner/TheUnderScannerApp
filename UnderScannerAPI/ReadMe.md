@@ -4,37 +4,54 @@
 
 # Connexion SSH au Jetson
 
-Le Jetson rejoint le hotspot du téléphone, donc **son IP change à chaque session** — c'est
-la même adresse que celle configurée dans les Réglages de l'app Android. Depuis un PC sur
-le même réseau (auth par mot de passe, pas de clé installée pour l'instant) :
+Le Jetson crée **son propre point d'accès WiFi** au démarrage ; le téléphone (et le PC) s'y
+connectent. Le Jetson en est la passerelle, donc son adresse est fixe : **`10.42.0.1`**
+(c'est aussi l'adresse par défaut dans les Réglages de l'app). Auth par mot de passe, pas
+de clé installée pour l'instant :
 
 ```
-ssh orin4slam@<ip-du-jetson>      # ex. ssh orin4slam@10.75.93.211
+ssh orin4slam@10.42.0.1
 ```
 
-**Attention** :  
-Pour modifier le backend :
-récupérer `app.py` du Jetson, patcher **cette** version, puis la renvoyer.
+Sans internet, le Jetson n'a pas de NTP : **son horloge dérive** (vérifier `"time"` dans
+`/status`), et les noms de scan sont datés avec.
 
-```
-scp orin4slam@<ip>:~/underscanner-api/app.py ./app.py     # récupérer la version qui tourne
-scp ./app.py orin4slam@<ip>:~/underscanner-api/app.py     # renvoyer après modif
-```
-OU
+## Mettre à jour le backend (procédure validée, PowerShell depuis le dossier du repo)
 
+Sur Windows, `ssh`/`scp` existent mais ne sont pas toujours dans le PATH :
+```powershell
+$env:Path += ";C:\Windows\System32\OpenSSH"
 ```
-ssh orin4slam@10.75.93.211 'cp ~/underscanner-api/app.py ~/underscanner-api/app.py.bak'
-scp UnderScannerAPI/app.py orin4slam@10.75.93.211:~/underscanner-api/app.py
 
-```
-PUIS
-```
-ssh -t orin4slam@10.75.93.211 'sudo systemctl restart underscanner'
-```
-Vérif
-```
-curl -s http://10.75.93.211:8000/status
-```
+**Attention** : sur le Jetson, SFTP refuse les chemins absolus → toujours
+`underscanner-api/app.py` (relatif au home), jamais `~/underscanner-api/...`.
+
+1. **Vérifier qu'on n'écrase rien** : la version du Jetson doit être celle du dernier commit
+   qui a été déployé (si elle diffère, quelqu'un l'a modifiée sur place → fusionner d'abord).
+   ```powershell
+   scp orin4slam@10.42.0.1:underscanner-api/app.py .\UnderScannerAPI\app.jetson.py
+   git hash-object .\UnderScannerAPI\app.jetson.py
+   git rev-parse <commit-deployé>:UnderScannerAPI/app.py     # les deux doivent être égaux
+   ```
+2. **Sauvegarder, envoyer, vérifier la syntaxe**
+   ```powershell
+   ssh orin4slam@10.42.0.1 "cp underscanner-api/app.py underscanner-api/app.py.bak"
+   scp .\UnderScannerAPI\app.py orin4slam@10.42.0.1:underscanner-api/app.py
+   ssh orin4slam@10.42.0.1 "cd underscanner-api && python3 -m py_compile app.py && echo SYNTAXE_OK"
+   ```
+3. **Redémarrer** (aucun scan ne doit tourner : le restart le coupe)
+   ```powershell
+   ssh -t orin4slam@10.42.0.1 "sudo systemctl restart underscanner"
+   ssh orin4slam@10.42.0.1 "journalctl -u underscanner -n 30 --no-pager"   # → Application startup complete
+   curl.exe -s http://10.42.0.1:8000/status
+   ```
+4. **Retour arrière** si ça ne démarre pas
+   ```powershell
+   ssh -t orin4slam@10.42.0.1 "cp underscanner-api/app.py.bak underscanner-api/app.py && sudo systemctl restart underscanner"
+   ```
+5. Supprimer `UnderScannerAPI\app.jetson.py`.
+
+Le `DeprecationWarning: on_event is deprecated` au démarrage est connu et sans effet.
 
 ## Commandes courantes une fois connecté
 
@@ -47,11 +64,11 @@ cp app.py app.py.bak                     # filet de sécurité avant une grosse 
 ls /data/underscanner/{bags,maps,configs,notes,trajectories}   # les artefacts des scans
 ```
 
-Test rapide de l'API sans passer par le téléphone (depuis le PC, en remplaçant `<ip>`) :
+Test rapide de l'API sans passer par le téléphone (depuis le PC connecté au point d'accès) :
 
 ```
-curl http://<ip>:8000/status
-curl http://<ip>:8000/scans
+curl.exe http://10.42.0.1:8000/status
+curl.exe http://10.42.0.1:8000/scans
 ```
 
 

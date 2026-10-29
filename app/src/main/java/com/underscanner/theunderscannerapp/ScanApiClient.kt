@@ -20,7 +20,7 @@ import java.util.concurrent.TimeUnit
 /**
  * HTTP client for the Jetson scan-library backend (Phase 1, plain request/response).
  * Implements the contract in §2 of the task spec. The base URL is configurable at
- * runtime because the Jetson's hotspot IP changes between sessions.
+ * runtime (Settings), even though the Jetson's own access point normally fixes it.
  */
 class ScanApiClient(initialBaseUrl: String) {
 

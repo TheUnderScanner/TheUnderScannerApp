@@ -23,8 +23,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.foundation.text.KeyboardOptions
 
 /**
- * Settings: edit the Jetson base URL. The hotspot-assigned IP changes between
- * sessions, so this is the main thing the user adjusts when reconnecting.
+ * Settings: edit the Jetson base URL. The Jetson's own access point normally fixes it
+ * at [SettingsRepository.DEFAULT_BASE_URL]; this is for other network setups.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -57,7 +57,7 @@ fun SettingsScreen(
         ) {
             Text("Adresse du Jetson", style = MaterialTheme.typography.titleMedium)
             Text(
-                "Hôte et port du serveur FastAPI. L'IP attribuée par le hotspot change : adaptez-la ici.",
+                "Hôte et port du serveur FastAPI. Sur le point d'accès du Jetson : http://10.42.0.1:8000.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )

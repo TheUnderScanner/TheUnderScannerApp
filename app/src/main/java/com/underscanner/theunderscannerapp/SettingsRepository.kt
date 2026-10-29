@@ -3,8 +3,8 @@ package com.underscanner.theunderscannerapp
 import android.content.Context
 
 /**
- * Persists the editable Jetson base URL (host + port). The hotspot-assigned IP
- * changes between sessions, so this must be easy to edit and is saved to prefs.
+ * Persists the editable Jetson base URL (host + port). The Jetson's own access point
+ * gives it a fixed address ([DEFAULT_BASE_URL]); it stays editable for other setups.
  */
 class SettingsRepository(context: Context) {
 
@@ -82,8 +82,9 @@ class SettingsRepository(context: Context) {
         }
 
     companion object {
-        // The Jetson's current hotspot IP. Editable in Settings.
-        const val DEFAULT_BASE_URL = "http://10.75.93.211:8000"
+        // The Jetson runs its own access point (NetworkManager hotspot) and is its gateway,
+        // so its address is fixed. Still editable in Settings.
+        const val DEFAULT_BASE_URL = "http://10.42.0.1:8000"
         const val DEFAULT_SSH_USER = "orin4slam"
         private const val KEY_BASE_URL = "base_url"
         private const val KEY_LAST_LOCATION = "last_location"

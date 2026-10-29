@@ -6,8 +6,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 TheUnderScannerApp is the Android control surface for a DIY handheld LiDAR cave scanner.
 A Jetson on the device runs the SLAM and stores each scan's artifacts; the phone connects
-to it over WiFi (the phone is the hotspot, the Jetson joins it) and is the device's only
-screen. The app browses scans, downloads point clouds, views config, edits notes, and
+to it over WiFi (the **Jetson runs its own access point**, NetworkManager hotspot, and the
+phone joins it — this used to be the other way round) and is the device's only screen.
+Consequence: the Jetson has no internet, hence **no NTP — its clock drifts** (it was ~9 days
+behind on 2026-10-29), and scan names are minted from that clock. The app browses scans, downloads point clouds, views config, edits notes, and
 visualizes `.pcd` files in a custom 3D OpenGL viewer.
 
 Current version: `v0.1.0` (Early development stage)
@@ -61,8 +63,8 @@ uninstalls the old version, and installs the new one.
 
 find the UnderScannerAPI/app.py
 
-A FastAPI service runs at `http://<jetson-ip>:8000`. The base URL is editable in the app's
-Settings (the hotspot-assigned IP changes between sessions); default is in
+A FastAPI service runs at `http://10.42.0.1:8000` (the Jetson is its access point's gateway, so
+the address is fixed). The base URL stays editable in the app's Settings; default is in
 `SettingsRepository.DEFAULT_BASE_URL`.
 
 | Method | Path | Purpose | Returns |
@@ -357,7 +359,7 @@ the Jetson; re-entering reconnects; a dropped socket auto-reconnects with backof
 - Permissions: `INTERNET`, `ACCESS_NETWORK_STATE`, `MANAGE_EXTERNAL_STORAGE` (All-files access,
   so scans can be written to public `Documents/UnderScanner/Scans`).
 - `res/xml/network_security_config.xml` permits cleartext HTTP to any host (dev app; the
-  Jetson is plain HTTP on the hotspot and its IP changes).
+  Jetson is plain HTTP on its own access point).
 
 ## Out of Scope (future phases — do not build here)
 
