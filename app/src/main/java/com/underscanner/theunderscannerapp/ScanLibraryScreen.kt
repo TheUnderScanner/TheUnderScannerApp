@@ -66,6 +66,7 @@ fun ScanLibraryScreen(
     // Dialog state
     var notesScan by remember { mutableStateOf<ScanInfo?>(null) }
     var configScan by remember { mutableStateOf<ScanInfo?>(null) }
+    var renameScan by remember { mutableStateOf<ScanInfo?>(null) }
 
     // When arriving from a just-finished scan, refresh then open its notes form ONCE.
     //
@@ -230,6 +231,8 @@ fun ScanLibraryScreen(
                                 onOpen = { onOpenPcd(scan.name) },
                                 onEditNotes = { notesScan = scan },
                                 onViewConfig = { configScan = scan },
+                                canRename = viewModel.canRename(scan),
+                                onRename = { renameScan = scan },
                                 onOpenHealth = {
                                     viewModel.openHealthLog(
                                         scanName = scan.name,
@@ -260,6 +263,14 @@ fun ScanLibraryScreen(
             scan = scan,
             viewModel = viewModel,
             onDismiss = { configScan = null }
+        )
+    }
+
+    renameScan?.let { scan ->
+        RenameDialog(
+            scan = scan,
+            viewModel = viewModel,
+            onDismiss = { renameScan = null }
         )
     }
 }
@@ -296,6 +307,8 @@ private fun ScanRow(
     onOpen: () -> Unit,
     onEditNotes: () -> Unit,
     onViewConfig: () -> Unit,
+    canRename: Boolean,
+    onRename: () -> Unit,
     onOpenHealth: () -> Unit
 ) {
     ElevatedCard(modifier = Modifier.fillMaxWidth()) {
@@ -382,6 +395,13 @@ private fun ScanRow(
 
                 Spacer(Modifier.weight(1f))
 
+                // Rename (date / location / run). Online only — the Jetson's files are renamed —
+                // and never for a local-only scan, which has no server side to rename.
+                if (!scan.localOnly) {
+                    IconButton(onClick = onRename, enabled = canRename) {
+                        Icon(Icons.Default.Edit, contentDescription = "Renommer")
+                    }
+                }
                 // Health charts. Enabled once the log is on the phone (works offline) or
                 // while connected, so it can still be fetched on demand.
                 if (scan.health.present || scan.healthLocal) {
@@ -462,6 +482,133 @@ private fun ConfigDialog(
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Fermer") } }
     )
+}
+
+// ---------------------------------------------------------------------------
+// Rename (date / location / run)
+// ---------------------------------------------------------------------------
+
+/** Preview of the backend's clean_location(): runs of non letters/digits → "-". */
+private fun previewLocation(s: String): String =
+    s.replace(Regex("[^\\p{L}\\p{N}]+"), "-").trim('-')
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun RenameDialog(
+    scan: ScanInfo,
+    viewModel: ScanLibraryViewModel,
+    onDismiss: () -> Unit
+) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+
+    var date by remember { mutableStateOf(scan.date) }
+    var location by remember { mutableStateOf(scan.location) }
+    var run by remember { mutableStateOf(scan.run.toIntOrNull()?.toString() ?: "1") }
+    var saving by remember { mutableStateOf(false) }
+    var pickingDate by remember { mutableStateOf(false) }
+
+    val parsedDate = runCatching { java.time.LocalDate.parse(date) }.getOrNull()
+    val cleanLocation = previewLocation(location)
+    val runNumber = run.toIntOrNull()?.takeIf { it in 1..99 }
+    val valid = parsedDate != null && cleanLocation.isNotEmpty() && runNumber != null
+    val preview = if (valid) "%s_%s_%02d".format(date, cleanLocation, runNumber) else null
+    val changed = preview != null && preview != scan.name
+
+    AlertDialog(
+        onDismissRequest = { if (!saving) onDismiss() },
+        title = { Text("Renommer le scan") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedTextField(
+                    value = date,
+                    onValueChange = { date = it.trim() },
+                    label = { Text("Date (AAAA-MM-JJ)") },
+                    singleLine = true,
+                    isError = parsedDate == null,
+                    trailingIcon = {
+                        IconButton(onClick = { pickingDate = true }) {
+                            Icon(Icons.Default.CalendarMonth, contentDescription = "Choisir la date")
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth()
+                )
+                OutlinedTextField(
+                    value = location,
+                    onValueChange = { location = it },
+                    label = { Text("Lieu") },
+                    singleLine = true,
+                    isError = cleanLocation.isEmpty(),
+                    modifier = Modifier.fillMaxWidth()
+                )
+                OutlinedTextField(
+                    value = run,
+                    onValueChange = { v -> run = v.filter { it.isDigit() }.take(2) },
+                    label = { Text("Run (1 à 99)") },
+                    singleLine = true,
+                    isError = runNumber == null,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                Text(
+                    preview ?: "Nom invalide",
+                    style = MaterialTheme.typography.bodySmall,
+                    fontFamily = FontFamily.Monospace,
+                    color = if (preview != null) MaterialTheme.colorScheme.onSurfaceVariant
+                    else MaterialTheme.colorScheme.error
+                )
+                Text(
+                    "Renomme tous les fichiers du scan sur le Jetson (bag, nuage, config, notes, " +
+                        "trajectoire, santé) et ceux déjà téléchargés sur ce téléphone.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(
+                enabled = valid && changed && !saving,
+                onClick = {
+                    saving = true
+                    scope.launch {
+                        viewModel.renameScan(
+                            scan, date, location, runNumber!!,
+                            onLocalWarning = { Toast.makeText(context, it, Toast.LENGTH_LONG).show() }
+                        ).fold(
+                            onSuccess = { newName ->
+                                Toast.makeText(context, "Renommé : $newName", Toast.LENGTH_SHORT).show()
+                                onDismiss()
+                            },
+                            onFailure = {
+                                saving = false
+                                Toast.makeText(context, "Échec : ${it.message}", Toast.LENGTH_LONG).show()
+                            }
+                        )
+                    }
+                }
+            ) { Text(if (saving) "…" else "Renommer") }
+        },
+        dismissButton = { TextButton(onClick = onDismiss, enabled = !saving) { Text("Annuler") } }
+    )
+
+    if (pickingDate) {
+        // DatePicker works in UTC midnight millis; convert at the edges only.
+        val utc = java.time.ZoneOffset.UTC
+        val state = rememberDatePickerState(
+            initialSelectedDateMillis = parsedDate?.atStartOfDay(utc)?.toInstant()?.toEpochMilli()
+        )
+        DatePickerDialog(
+            onDismissRequest = { pickingDate = false },
+            confirmButton = {
+                TextButton(onClick = {
+                    state.selectedDateMillis?.let {
+                        date = java.time.Instant.ofEpochMilli(it).atZone(utc).toLocalDate().toString()
+                    }
+                    pickingDate = false
+                }) { Text("OK") }
+            },
+            dismissButton = { TextButton(onClick = { pickingDate = false }) { Text("Annuler") } }
+        ) { DatePicker(state = state) }
+    }
 }
 
 // ---------------------------------------------------------------------------

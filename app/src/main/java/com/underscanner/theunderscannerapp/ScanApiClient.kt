@@ -96,6 +96,31 @@ class ScanApiClient(initialBaseUrl: String) {
     }
 
     /**
+     * POST /scans/{name}/rename — rename every artifact of a scan on the Jetson. Returns the
+     * final name as the backend minted it (it cleans the location the same way as at scan
+     * start). Failures carry the backend's French `detail` (name taken, scan running, …).
+     */
+    suspend fun renameScan(name: String, date: String, location: String, run: Int): Result<String> =
+        withContext(Dispatchers.IO) {
+            runCatching {
+                val payload = JSONObject()
+                    .put("date", date)
+                    .put("location", location)
+                    .put("run", run)
+                val body = payload.toString().toRequestBody("application/json".toMediaType())
+                client.newCall(Request.Builder().url("$baseUrl/scans/$name/rename").post(body).build())
+                    .execute().use { response ->
+                        val text = response.body?.string().orEmpty()
+                        if (!response.isSuccessful) {
+                            val detail = runCatching { JSONObject(text).optString("detail") }.getOrNull()
+                            throw IOException(detail?.ifBlank { null } ?: "HTTP ${response.code}")
+                        }
+                        JSONObject(text).getString("name")
+                    }
+            }
+        }
+
+    /**
      * GET /scans/{name}/pcd — stream the point cloud to [destination], reporting
      * progress in [0,1] (or -1 if the server sends no Content-Length). Honors
      * coroutine cancellation and cleans up a partial file on failure.

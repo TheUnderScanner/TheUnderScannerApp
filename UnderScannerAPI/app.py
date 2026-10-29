@@ -681,6 +681,96 @@ async def put_notes(name: str, request: Request):
     (NOTES / f"{name}.json").write_text(json.dumps(data, indent=2))
     return {"ok": True}
 
+def scan_artifacts(name: str) -> list[Path]:
+    """Every on-disk artifact of a scan, keyed by its name. Keep in sync with
+    collect_scan_names() and scan_stop() — rename moves exactly this list."""
+    return [BAGS / name, MAPS / f"{name}.pcd", CONFIGS / f"{name}.yaml",
+            NOTES / f"{name}.json", TRAJ / f"{name}.traj", HEALTH / f"{name}.jsonl"]
+
+def _retitle_health_header(path: Path, new_name: str):
+    """Point the health log's header record at the new name (best effort)."""
+    try:
+        lines = path.read_text().splitlines(keepends=True)
+        if not lines:
+            return
+        head = json.loads(lines[0])
+        if head.get("type") != "header":
+            return
+        head["scan"] = new_name
+        lines[0] = json.dumps(head) + "\n"
+        tmp = path.with_suffix(".jsonl.tmp")
+        tmp.write_text("".join(lines))
+        tmp.replace(path)
+    except Exception:
+        pass
+
+@app.post("/scans/{name}/rename")
+async def rename_scan(name: str, request: Request):
+    """Rename a scan: body {date, location, run}, each optional (defaults: current value).
+
+    Moves every artifact (bag dir, pcd, config, notes, trajectory, health log) in one go
+    and rolls back the ones already moved if any step fails. The bag directory is renamed
+    as a whole; the files inside keep their old names, which rosbag2's metadata.yaml
+    references relatively, so the bag stays readable. 409 for the running scan or when the
+    target name is taken."""
+    safe(name)
+    if not any(p.exists() for p in scan_artifacts(name)):
+        raise HTTPException(404, "scan introuvable")
+    try:
+        body = (await request.json()) or {}
+    except Exception:
+        body = {}
+    parts = name.split("_")
+    date = str(body.get("date", parts[0])).strip()
+    location = str(body.get("location", "_".join(parts[1:-1])))
+    run = str(body.get("run", parts[-1])).strip()
+
+    try:
+        if not DATE_RE.match(date): raise ValueError
+        datetime.date.fromisoformat(date)              # rejects 2026-02-31
+    except ValueError:
+        raise HTTPException(400, "date invalide (AAAA-MM-JJ)")
+    if not re.search(r"[^\W_]", location):          # nothing clean_location would keep
+        raise HTTPException(400, "lieu vide")
+    location = clean_location(location)             # same cleaning as at scan start
+    if not run.isdigit() or not 1 <= int(run) <= 99:
+        raise HTTPException(400, "run invalide (1 à 99)")
+    new = f"{date}_{location}_{int(run):02d}"
+    if not NAME_RE.match(new):
+        raise HTTPException(400, "nom invalide")
+    if new == name:
+        return {"ok": True, "name": name}
+
+    with S.lock:
+        if S.running and S.scan == name:
+            raise HTTPException(409, "scan en cours : arrête-le avant de le renommer")
+    if new in collect_scan_names():
+        raise HTTPException(409, f"le nom {new} existe déjà")
+
+    moves = [(src, dst) for src, dst in zip(scan_artifacts(name), scan_artifacts(new)) if src.exists()]
+    if not moves:
+        raise HTTPException(404, "scan introuvable")
+    done = []
+    try:
+        for src, dst in moves:
+            if dst.exists():
+                raise FileExistsError(dst)
+            src.rename(dst)                         # same filesystem (/data): atomic
+            done.append((src, dst))
+    except Exception as e:
+        for src, dst in reversed(done):
+            try: dst.rename(src)
+            except Exception: pass
+        raise HTTPException(500, f"renommage annulé : {e}")
+
+    _retitle_health_header(HEALTH / f"{new}.jsonl", new)
+    try:                                            # sticky location follows the rename
+        if SCAN_STATE.exists() and SCAN_STATE.read_text().strip() == name:
+            SCAN_STATE.write_text(new)
+    except Exception:
+        pass
+    return {"ok": True, "name": new}
+
 # ------------------- live preview protocol introspection -------------------
 @app.get("/preview/format")
 def preview_format():

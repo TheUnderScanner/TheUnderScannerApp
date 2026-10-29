@@ -84,6 +84,24 @@ object LocalScanStorage {
             ?: emptyList()
 
     /** File used to cache the last successful `/scans` response for offline rendering. */
+    /**
+     * Follow a server-side rename: move this scan's downloaded files (pcd, traj, health log)
+     * to the new name. Returns false if any could not be moved (e.g. a stray local file
+     * already holds the new name) — those stay under the old name.
+     */
+    fun renameScan(context: Context, oldName: String, newName: String): Boolean {
+        var ok = true
+        for ((src, dst) in listOf(
+            pcdFile(context, oldName) to pcdFile(context, newName),
+            trajFile(context, oldName) to trajFile(context, newName),
+            healthFile(context, oldName) to healthFile(context, newName),
+        )) {
+            if (!src.exists()) continue
+            if (dst.exists() || !src.renameTo(dst)) ok = false
+        }
+        return ok
+    }
+
     fun scansCacheFile(context: Context): File =
         File(context.filesDir, "scans_cache.json")
 }

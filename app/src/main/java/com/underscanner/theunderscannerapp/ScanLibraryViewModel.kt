@@ -358,6 +358,41 @@ class ScanLibraryViewModel(app: Application) : AndroidViewModel(app) {
         }
 
     // -----------------------------------------------------------------------
+    // Rename (online only: the Jetson's files are the source of truth)
+    // -----------------------------------------------------------------------
+
+    /** Rename is offered only for server scans, while connected, and not mid-download. */
+    fun canRename(scan: ScanInfo): Boolean =
+        _connection.value is ConnectionState.Connected && !scan.localOnly && !isDownloading(scan.name)
+
+    /**
+     * Rename [scan] on the Jetson, then make the phone follow: move its downloaded files,
+     * re-key the notes-search cache and refetch the list. Returns the new name, or a
+     * failure whose message is shown as is. A local-file hiccup doesn't fail the rename
+     * (the server side is done) — it is reported through [onLocalWarning].
+     */
+    suspend fun renameScan(
+        scan: ScanInfo,
+        date: String,
+        location: String,
+        run: Int,
+        onLocalWarning: (String) -> Unit
+    ): Result<String> {
+        if (!canRename(scan)) return Result.failure(IllegalStateException("Connexion au Jetson requise"))
+        return client.renameScan(scan.name, date, location, run).onSuccess { newName ->
+            if (newName == scan.name) return@onSuccess
+            if (!LocalScanStorage.renameScan(getApplication(), scan.name, newName)) {
+                onLocalWarning("Renommé sur le Jetson, mais des fichiers locaux gardent l'ancien nom.")
+            }
+            notesTextCache.remove(scan.name)?.let { notesTextCache[newName] = it }
+            // A refresh already in flight may carry the pre-rename list: let it land, then
+            // fetch again (refreshSuspending() is a no-op while another one runs).
+            while (_isRefreshing.value) delay(100)
+            refreshSuspending()
+        }
+    }
+
+    // -----------------------------------------------------------------------
     // Settings
     // -----------------------------------------------------------------------
 

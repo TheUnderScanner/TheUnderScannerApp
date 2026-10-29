@@ -85,6 +85,7 @@ the address is fixed). The base URL stays editable in the app's Settings; defaul
 | GET | `/scans/{name}/config` | Read config (read-only) | `text/plain` (YAML) |
 | GET | `/scans/{name}/notes` | Read notes form | JSON object (`{}` if none) |
 | PUT | `/scans/{name}/notes` | Save notes form | `{ok: true}` |
+| POST | `/scans/{name}/rename` | Rename; body `{date, location, run}` (each optional) | `{ok, name}`; **409** running / name taken, **400** invalid, **404** unknown |
 | GET | `/scans/{name}/health` | Per-scan health log | JSONL body; **404** if none |
 | GET | `/system/health` | Live Jetson telemetry | latest cached sample + `static` |
 | POST | `/scan/start` | Start a scan; body `{location, client_time_ms, client_date}` | `{scan, running, started_at}`; **409** if running |
@@ -190,6 +191,14 @@ drawn as a yellow polyline (`Trajectory.kt` + `MyGLRenderer.drawTrajectory`, `GL
   Both are client-side and work offline. Hosts the read-only **Config** dialog and the **Notes**
   form dialog (`site, issues, free`; full-width via `usePlatformDefaultWidth = false`, with a
   centred *Notes / date / scan-name* header, the name marquee-scrolling rather than truncating).
+  A **pencil** (left of the health-chart icon; server scans only, enabled only while connected
+  and not mid-download) opens the **Rename** dialog: date (text + `DatePickerDialog`), location,
+  run, with a live preview of the final name. The backend renames every artifact
+  (`scan_artifacts()`: bag dir, pcd, config, notes, traj, health) with rollback on failure,
+  retitles the health-log header, moves `.current_scan` if it pointed there, and refuses the
+  running scan; the bag dir's inner files keep their old names (rosbag2's `metadata.yaml`
+  references them relatively). The phone then moves its downloaded files
+  (`LocalScanStorage.renameScan`), re-keys the notes-search cache and refetches the list.
   Legacy `conditions` / `estimated_length_m` fields are no
   longer shown or written (existing values stay in the Jetson's JSON, just unused).
   The `openNotes` route argument is consumed once via a **`rememberSaveable`** flag — with a
