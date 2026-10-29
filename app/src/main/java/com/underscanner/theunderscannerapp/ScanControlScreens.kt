@@ -362,6 +362,8 @@ fun ActiveScanScreen(
     var reflHigh by remember { mutableStateOf(1f) }
     var noiseFilter by remember { mutableStateOf(NoiseFilter.OFF) }
     var showTrajectory by remember { mutableStateOf(true) } // path builds as the scan runs
+    // Pivot magnetised to the current sensor pose (session-only, like the other live toggles).
+    var followPose by remember { mutableStateOf(false) }
     // Camera control mode: false = one-finger drag orbits, true = one-finger drag pans the pivot.
     var panMode by remember { mutableStateOf(false) }
 
@@ -390,6 +392,7 @@ fun ActiveScanScreen(
                     view.setReflBounds(reflLow, reflHigh)
                     view.setNoiseFilter(noiseFilter)
                     view.setShowTrajectory(showTrajectory)
+                    view.setFollowPose(followPose)
                     view.setPanMode(panMode)
                     glView = view
                 }
@@ -468,6 +471,11 @@ fun ActiveScanScreen(
                 onToggleTrajectory = {
                     showTrajectory = !showTrajectory
                     glView?.setShowTrajectory(showTrajectory)
+                },
+                followPose = followPose,
+                onToggleFollowPose = {
+                    followPose = !followPose
+                    glView?.setFollowPose(followPose)
                 }
             )
         }

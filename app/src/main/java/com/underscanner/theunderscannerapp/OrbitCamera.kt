@@ -54,6 +54,8 @@ class OrbitCamera {
         const val MIN_DISTANCE = 0.1f
         const val DOLLY_SENS = 0.005f
         const val ORBIT_DEG_PER_PX = 0.3f
+        /** Follow-magnet time constant: the pivot closes ~63 % of the gap every 250 ms. */
+        const val FOLLOW_TAU_MS = 250f
     }
 
     /** Magnitude of the eye-to-pivot distance, floored so adaptive speeds never hit 0. */
@@ -186,6 +188,20 @@ class OrbitCamera {
         pivot[0] += worldUp[0] * amt
         pivot[1] += worldUp[1] * amt
         pivot[2] += worldUp[2] * amt
+    }
+
+    /**
+     * "Follow" magnet: ease the pivot toward a moving target (the live sensor pose) with a
+     * frame-rate-independent exponential approach. Only the pivot moves — yaw, pitch and
+     * distance are the user's — so orbiting stays free while the view tracks the walker.
+     * Yields to an in-flight frame-all animation.
+     */
+    fun followPivot(tx: Float, ty: Float, tz: Float, dtMs: Float) {
+        if (animating) return
+        val k = 1f - exp(-dtMs / FOLLOW_TAU_MS)
+        pivot[0] += (tx - pivot[0]) * k
+        pivot[1] += (ty - pivot[1]) * k
+        pivot[2] += (tz - pivot[2]) * k
     }
 
     /** Frame the whole scene (pivot → center, distance → fit). */

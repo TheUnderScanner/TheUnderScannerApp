@@ -235,7 +235,9 @@ drawn as a yellow polyline (`Trajectory.kt` + `MyGLRenderer.drawTrajectory`, `GL
 - **ViewerControls.kt** — two clusters, both reused by `PCDViewerScreen` and `ActiveScanScreen`,
   laid out as a bottom-right `Row` (`ColorModeCluster` left of `ViewerOptionsCluster`):
   - `ViewerOptionsCluster`: an icon-only access FAB toggling a panel of child actions (pressing a
-    plain child auto-collapses it). Children top→bottom: optional **auto-orbit** (tap-toggle +
+    plain child auto-collapses it). Children top→bottom: optional **Suivre la position**
+    (live only, `MyLocation` icon: magnetises the orbit pivot to the sensor pose — see
+    "Follow" under Gestures), optional **auto-orbit** (tap-toggle +
     long-press speed slider), **Filtre bruit** (`NoiseFilterFab`: 3-stop tag noise filter — tap
     cycles Off/Conservateur/Agressif, long-press reveals a 3-detent vertical slider), **Tout
     afficher** (frame-all), **Repères** (axis-ruler always-on), **Projection** (perspective ⇄
@@ -346,6 +348,13 @@ drawn as a yellow polyline (`Trajectory.kt` + `MyGLRenderer.drawTrajectory`, `GL
     pivot along world-up (Z) in real time (`OrbitCamera.moveVertical`); double-tap without a drag
     does nothing. (The old depth-ray teleport was removed.)
   - Only **Frame-All** ("Tout afficher") animates (~0.3 s ease-out); it refits the whole cloud.
+  - **Follow** (live toggle, session-only): each frame `OrbitCamera.followPivot` eases the
+    pivot toward the pose marker (exponential, `FOLLOW_TAU_MS` = 250 ms, frame-rate independent).
+    Only the pivot is driven — yaw/pitch/distance stay the user's, so orbit and pinch are free.
+    Pan / Z-slide still move the pivot: the magnet holds off while they run
+    (`lastPivotGestureMs`) and pulls back 200 ms after the finger goes still. It yields to a
+    Frame-All animation (which then reads as "zoom out around me"). The magnet's own motion
+    re-baselines `prevPivot`, so it does **not** light the axis ruler while walking.
 - **AxisRuler.kt** — yellow 3-axis "ruler" (lines through the pivot + meter tick marks at fixed
   world graduations, so a moving pivot visibly slides through them). Step adapts to zoom
   (1 m → 10 m → 100 m → 1 km…) to bound the tick count. **Decoupled from gestures**: the renderer

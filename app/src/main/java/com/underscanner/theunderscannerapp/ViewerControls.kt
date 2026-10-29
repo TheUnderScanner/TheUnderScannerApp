@@ -27,6 +27,7 @@ import androidx.compose.material.icons.filled.FilterAlt
 import androidx.compose.material.icons.filled.Gradient
 import androidx.compose.material.icons.filled.GridOn
 import androidx.compose.material.icons.filled.Height
+import androidx.compose.material.icons.filled.MyLocation
 import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material.icons.filled.RotateRight
 import androidx.compose.material.icons.filled.Sell
@@ -90,6 +91,8 @@ fun ViewerOptionsCluster(
     onNoiseFilterChange: ((NoiseFilter) -> Unit)? = null,
     showTrajectory: Boolean = false,
     onToggleTrajectory: (() -> Unit)? = null,
+    followPose: Boolean = false,
+    onToggleFollowPose: (() -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     var expanded by remember { mutableStateOf(false) }
@@ -108,7 +111,13 @@ fun ViewerOptionsCluster(
                 horizontalAlignment = Alignment.CenterHorizontally,
                 verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
-                // Auto-orbit is the topmost sub-button.
+                // Follow the current position (live only): the topmost sub-button.
+                if (onToggleFollowPose != null) {
+                    OptionFab(Icons.Default.MyLocation, "Suivre la position", active = followPose) {
+                        onToggleFollowPose(); expanded = false
+                    }
+                }
+                // Auto-orbit sits below it.
                 if (onToggleAutoOrbit != null) {
                     AutoOrbitFab(
                         active = autoOrbitOn,

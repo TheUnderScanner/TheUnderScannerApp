@@ -75,6 +75,16 @@ class MyGLRenderer(
         poseMarker = floatArrayOf(x, y, z)
     }
 
+    // "Follow position" (live): the pivot is magnetised to [poseMarker]. Pan / Z-slide still
+    // move it, but the magnet holds off while such a gesture is under way and pulls the pivot
+    // back once the finger has been still for FOLLOW_RELEASE_MS. Orbit and dolly are untouched.
+    @Volatile
+    private var followPose = false
+    private var lastPivotGestureMs = 0L
+    private val FOLLOW_RELEASE_MS = 200L
+
+    fun setFollowPose(on: Boolean) { followPose = on }
+
     // ----------------------------
     // Camera
     // ----------------------------
@@ -188,6 +198,15 @@ class MyGLRenderer(
         camera.update(dt)
         if (autoOrbitOn) camera.autoOrbit(autoOrbitDegPerSec, dt)
 
+        // Gesture / animation pivot motion lights the axis ruler; the follow magnet's own pull
+        // must not (it moves every frame while walking), so sample motion before applying it.
+        val pivotMovedThisFrame = pivotMoved()
+        val target = poseMarker
+        if (followPose && target != null && now - lastPivotGestureMs > FOLLOW_RELEASE_MS) {
+            camera.followPivot(target[0], target[1], target[2], dt)
+            syncPrevPivot()
+        }
+
         GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT or GLES20.GL_DEPTH_BUFFER_BIT)
         GLES20.glUseProgram(program)
 
@@ -249,7 +268,7 @@ class MyGLRenderer(
 
         // --- Axis ruler: show whenever the pivot is moving (or always, if toggled). ---
         // Driven purely by detecting pivot motion, so any code that moves the pivot lights it up.
-        if (pivotMoved()) pivotMovingUntilMs = now + HELPER_FADE_MS
+        if (pivotMovedThisFrame) pivotMovingUntilMs = now + HELPER_FADE_MS
         if (showHelpersAlways || now < pivotMovingUntilMs) drawRuler()
 
         // --- Report graduation-scale changes (drives the top-left "échelle" flash). ---
@@ -272,13 +291,21 @@ class MyGLRenderer(
         return moved
     }
 
+    /** Re-baseline [pivotMoved] after a motion that shouldn't count (the follow magnet). */
+    private fun syncPrevPivot() {
+        prevPivot[0] = camera.pivot[0]; prevPivot[1] = camera.pivot[1]; prevPivot[2] = camera.pivot[2]
+    }
+
     private fun aspect(): Float = surfaceWidth.toFloat() / surfaceHeight.toFloat()
 
     // ====== Gesture entry points (called on the GL thread via queueEvent) ======
 
     fun camOrbit(dxPx: Float, dyPx: Float) = camera.orbit(dxPx, dyPx)
     fun camDolly(spreadDeltaPx: Float) = camera.dolly(spreadDeltaPx)
-    fun camPan(dxPx: Float, dyPx: Float) = camera.pan(dxPx, dyPx, surfaceHeight)
+    fun camPan(dxPx: Float, dyPx: Float) {
+        lastPivotGestureMs = SystemClock.uptimeMillis()
+        camera.pan(dxPx, dyPx, surfaceHeight)
+    }
 
     /** Frame the whole cloud. Pulls fresh bounds from the live preview when streaming. */
     fun frameAll() {
@@ -374,7 +401,10 @@ class MyGLRenderer(
     }
 
     /** Double-tap-then-drag → slide the pivot along the world-up (Z) axis, live. */
-    fun zSlideMove(dyPx: Float) = camera.moveVertical(dyPx, surfaceHeight)
+    fun zSlideMove(dyPx: Float) {
+        lastPivotGestureMs = SystemClock.uptimeMillis()
+        camera.moveVertical(dyPx, surfaceHeight)
+    }
 
     /** Force the axis ruler on (true) or back to auto-show-while-moving (false). */
     fun setHelpersAlways(on: Boolean) { showHelpersAlways = on }

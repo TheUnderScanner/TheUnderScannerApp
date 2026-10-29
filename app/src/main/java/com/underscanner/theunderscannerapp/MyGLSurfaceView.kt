@@ -202,6 +202,9 @@ class MyGLSurfaceView(
     /** Show/hide the LiDAR path polyline. */
     fun setShowTrajectory(on: Boolean) = queueEvent { renderer.setShowTrajectory(on) }
 
+    /** Live view: magnetise the orbit pivot to the current sensor pose. */
+    fun setFollowPose(on: Boolean) = queueEvent { renderer.setFollowPose(on) }
+
     /** Whether a path (live or loaded from a saved scan's .traj) is available to draw. */
     fun hasTrajectory(): Boolean = renderer.hasTrajectory()
 
