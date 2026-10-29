@@ -173,7 +173,31 @@ def safe(name: str) -> str:
     if not NAME_RE.match(name): raise HTTPException(400, "invalid scan name")
     return name
 
-def iso(ts): return datetime.datetime.fromtimestamp(ts).isoformat(timespec="seconds")
+# ---- wall clock ----
+# The Jetson runs its own access point: no internet, no NTP, so its clock drifts (by days).
+# The phone sends its own time with POST /scan/start; we keep the difference and apply it
+# to every user-facing timestamp (scan names, started_at, health header, notes). Durations
+# (elapsed, rates, health "t") keep using the raw clock, where the offset cancels out.
+# The system clock itself is never touched: no sudo, and no clock jump under running ROS.
+CLOCK_MIN_YEAR, CLOCK_MAX_YEAR = 2024, 2100   # sanity bounds for a client-sent time
+_clock = {"offset": 0.0}
+
+def set_clock_from_client(client_ms) -> None:
+    """Learn the phone-vs-Jetson clock offset from a client epoch in milliseconds."""
+    if not isinstance(client_ms, (int, float)) or isinstance(client_ms, bool):
+        return
+    try:
+        year = datetime.datetime.fromtimestamp(client_ms / 1000).year
+    except (OverflowError, OSError, ValueError):
+        return
+    if not CLOCK_MIN_YEAR <= year <= CLOCK_MAX_YEAR:
+        return
+    _clock["offset"] = client_ms / 1000 - time.time()
+
+def wall_now() -> datetime.datetime:
+    return datetime.datetime.fromtimestamp(time.time() + _clock["offset"])
+
+def iso(ts): return datetime.datetime.fromtimestamp(ts + _clock["offset"]).isoformat(timespec="seconds")
 
 def collect_scan_names():
     names = set()
@@ -197,8 +221,12 @@ def clean_location(location: str) -> str:
     s = re.sub(r"[\W_]+", "-", location).strip("-")
     return s or "apartment"
 
-def make_scan_name(location: str | None) -> str:
-    date = datetime.date.today().isoformat()
+DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+def make_scan_name(location: str | None, client_date: str | None = None) -> str:
+    # The phone's *local* date wins (it is what the user reads); else the corrected clock.
+    date = client_date if isinstance(client_date, str) and DATE_RE.match(client_date) \
+        else wall_now().date().isoformat()
     if not location:                       # sticky: reuse last location
         if SCAN_STATE.exists():
             parts = SCAN_STATE.read_text().strip().split("_")
@@ -451,6 +479,7 @@ class HealthMonitor:
             fh.write(json.dumps({
                 "type": "header", "v": 1, "scan": name,
                 "started_at": iso(started_at), "hostname": socket.gethostname(),
+                "clock_offset_s": round(_clock["offset"], 1),
                 "interval_s": HEALTH_WRITE_S,
                 "static": {"cpu_cores": self.cores, "cpu_max_mhz": self.cpu_max_mhz,
                            "mem_total_mb": self.mem_total_mb, "power_mode": self.power_mode,
@@ -574,7 +603,8 @@ def stop_proc(name, sig=signal.SIGINT, timeout=8):
 @app.get("/status")
 def status():
     return {"status":"ready","hostname":socket.gethostname(),
-            "time":datetime.datetime.now().isoformat(timespec="seconds"),
+            "time":wall_now().isoformat(timespec="seconds"),
+            "clock_offset_s":round(_clock["offset"], 1),
             "data_root":str(DATA_ROOT),"version":app.version}
 
 @app.get("/scans")
@@ -647,7 +677,7 @@ def get_notes(name: str):
 @app.put("/scans/{name}/notes")
 async def put_notes(name: str, request: Request):
     safe(name); NOTES.mkdir(parents=True, exist_ok=True)
-    data = await request.json(); data["_updated"] = datetime.datetime.now().isoformat(timespec="seconds")
+    data = await request.json(); data["_updated"] = wall_now().isoformat(timespec="seconds")
     (NOTES / f"{name}.json").write_text(json.dumps(data, indent=2))
     return {"ok": True}
 
@@ -681,13 +711,15 @@ def preview_format():
 async def scan_start(request: Request):
     with S.lock:
         if S.running: raise HTTPException(409, "a scan is already running")
-    location = None
+    location = client_date = None
     try:
-        body = await request.json(); location = (body or {}).get("location")
+        body = (await request.json()) or {}
+        location, client_date = body.get("location"), body.get("client_date")
+        set_clock_from_client(body.get("client_time_ms"))
     except Exception:
         pass
     for d in (BAGS, MAPS, CONFIGS, NOTES, TRAJ, HEALTH): d.mkdir(parents=True, exist_ok=True)
-    name = make_scan_name(location); SCAN_STATE.write_text(name)
+    name = make_scan_name(location, client_date); SCAN_STATE.write_text(name)
 
     spawn("driver", LIDAR_LAUNCH); time.sleep(3.0)         # let the driver come up
     slam_cmd = list(SLAM_LAUNCH_BASE) #+ [f"map_file_path:={MAPS}/{name}.pcd"]

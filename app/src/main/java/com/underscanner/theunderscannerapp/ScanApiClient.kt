@@ -193,6 +193,10 @@ class ScanApiClient(initialBaseUrl: String) {
         runCatching {
             val payload = JSONObject().apply {
                 if (!location.isNullOrBlank()) put("location", location.trim())
+                // The Jetson (own access point, no NTP) has a drifting clock: send ours so
+                // it names the scan with the phone's local date and corrects its timestamps.
+                put("client_time_ms", System.currentTimeMillis())
+                put("client_date", java.time.LocalDate.now().toString())
             }
             val body = payload.toString().toRequestBody("application/json".toMediaType())
             client.newCall(Request.Builder().url("$baseUrl/scan/start").post(body).build())

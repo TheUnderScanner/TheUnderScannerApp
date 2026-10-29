@@ -9,7 +9,16 @@ A Jetson on the device runs the SLAM and stores each scan's artifacts; the phone
 to it over WiFi (the **Jetson runs its own access point**, NetworkManager hotspot, and the
 phone joins it — this used to be the other way round) and is the device's only screen.
 Consequence: the Jetson has no internet, hence **no NTP — its clock drifts** (it was ~9 days
-behind on 2026-10-29), and scan names are minted from that clock. The app browses scans, downloads point clouds, views config, edits notes, and
+behind on 2026-10-29). Fix: `POST /scan/start` carries the phone's `client_time_ms` + local
+`client_date`; the backend names the scan with `client_date` and keeps
+`offset = client − time.time()`, applied by `iso()` / `wall_now()` to every user-facing
+timestamp (`started_at`, health header, notes `_updated`, `/status` time; exposed as
+`clock_offset_s`). Durations keep the raw clock. The system clock is deliberately **not** set
+(would need sudo, and a jump under running ROS nodes is risky), so bag stamps / file mtimes
+stay on the Jetson clock. The offset lives in memory: after a backend restart it's 0 until
+the next scan start.
+**Backend deploys:** `UnderScannerAPI/deploy-backend.ps1` (deploys only the committed HEAD
+blob; refuses if the Jetson's file isn't found in git history = edited on the Jetson). The app browses scans, downloads point clouds, views config, edits notes, and
 visualizes `.pcd` files in a custom 3D OpenGL viewer.
 
 Current version: `v0.1.0` (Early development stage)
@@ -69,7 +78,7 @@ the address is fixed). The base URL stays editable in the app's Settings; defaul
 
 | Method | Path | Purpose | Returns |
 |---|---|---|---|
-| GET | `/status` | Readiness heartbeat | `{status, hostname, time, data_root, version}` |
+| GET | `/status` | Readiness heartbeat | `{status, hostname, time, clock_offset_s, data_root, version}` |
 | GET | `/scans` | List all scans + metadata | `{scans: [ScanInfo]}` (newest first) |
 | GET | `/scans/{name}/pcd` | Download point cloud | binary `application/octet-stream` |
 | GET | `/scans/{name}/trajectory` | Download LiDAR path (`UTR1`) | binary `application/octet-stream`; **404** if none |
@@ -78,7 +87,7 @@ the address is fixed). The base URL stays editable in the app's Settings; defaul
 | PUT | `/scans/{name}/notes` | Save notes form | `{ok: true}` |
 | GET | `/scans/{name}/health` | Per-scan health log | JSONL body; **404** if none |
 | GET | `/system/health` | Live Jetson telemetry | latest cached sample + `static` |
-| POST | `/scan/start` | Start a scan; body `{location}` | `{scan, running, started_at}`; **409** if running |
+| POST | `/scan/start` | Start a scan; body `{location, client_time_ms, client_date}` | `{scan, running, started_at}`; **409** if running |
 | POST | `/scan/stop` | Stop + save | `{scan, running:false, pcd, bag}`; **409** if none |
 | GET | `/scan/status` | Poll scan state | `{running, scan, started_at, elapsed_s, odom_ok, cloud_ok}` |
 | WS | `/ws/preview` | Live preview stream | binary cloud frames + JSON pose / `hello`; client → `client_stats` |

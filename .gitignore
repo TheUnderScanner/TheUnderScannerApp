@@ -38,6 +38,9 @@ local.properties
 # Windows junk
 Thumbs.db
 
+# Jetson copy kept by deploy-backend.ps1 when it finds unknown edits (merge, don't commit)
+UnderScannerAPI/app.jetson.py
+
 # Log files
 *.log
 

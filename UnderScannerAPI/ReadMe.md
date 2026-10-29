@@ -13,10 +13,33 @@ de clé installée pour l'instant :
 ssh orin4slam@10.42.0.1
 ```
 
-Sans internet, le Jetson n'a pas de NTP : **son horloge dérive** (vérifier `"time"` dans
-`/status`), et les noms de scan sont datés avec.
+Sans internet, le Jetson n'a pas de NTP : **son horloge dérive**. L'app envoie l'heure du
+téléphone à chaque démarrage de scan ; le backend date le scan avec et corrige ses
+horodatages (`"clock_offset_s"` dans `/status` = l'écart corrigé, 0 tant qu'aucun scan n'a
+été lancé depuis le redémarrage du service).
 
-## Mettre à jour le backend (procédure validée, PowerShell depuis le dossier du repo)
+## Mettre à jour le backend : le script
+
+Commite d'abord `app.py`, puis, PC connecté au point d'accès du Jetson :
+```powershell
+.\UnderScannerAPI\deploy-backend.ps1            # déploie le app.py de HEAD
+.\UnderScannerAPI\deploy-backend.ps1 -DryRun    # vérifie seulement, ne change rien
+```
+Il déploie **uniquement la version commitée** (HEAD), refuse si un scan tourne, et vérifie
+que la version actuelle du Jetson existe dans l'historique git de `app.py` (sinon quelqu'un
+l'a modifiée sur place : il s'arrête et la garde dans `UnderScannerAPI\app.jetson.py` pour
+fusion). Il contrôle la syntaxe *avant* de remplacer, garde `app.py.bak`, redémarre le
+service, et revient automatiquement à l'ancienne version si le service ne répond plus.
+
+**Pour ne pas taper le mot de passe 3 fois**, installer une fois une clé SSH :
+```powershell
+$env:Path += ";C:\Windows\System32\OpenSSH"
+ssh-keygen -t ed25519                     # Entrée partout (pas de phrase de passe) si une clé n'existe pas déjà
+type $env:USERPROFILE\.ssh\id_ed25519.pub | ssh orin4slam@10.42.0.1 "mkdir -p .ssh && chmod 700 .ssh && cat >> .ssh/authorized_keys && chmod 600 .ssh/authorized_keys"
+```
+Le mot de passe `sudo` du redémarrage reste demandé (une fois).
+
+## Mettre à jour le backend à la main (ce que fait le script)
 
 Sur Windows, `ssh`/`scp` existent mais ne sont pas toujours dans le PATH :
 ```powershell
