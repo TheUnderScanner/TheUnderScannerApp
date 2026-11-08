@@ -228,6 +228,75 @@ class AppSlamTest(unittest.TestCase):
         self.assertIsNone(row["slam"])
         self.assertTrue(row["config"]["present"])
 
+    # ---- USB stick (lsblk / udisksctl / rsync faked) ----
+    def _stick(self, free):
+        mp = Path(self.tmp.name) / "stick"
+        mp.mkdir(exist_ok=True)
+        return self.app.usb.UsbDevice(device="/dev/sda1", disk="/dev/sda", label="ESD-USB",
+                                      model="Cruzer Force", vendor="SanDisk", size=32 * 10**9,
+                                      fstype="exfat", fsver=None, mountpoint=str(mp), free=free)
+
+    def test_7_usb_copy_flow(self):
+        from unittest import mock
+        app, c = self.app, self.client
+        scan = "2026-11-08_Grotte_01"                 # created + renamed by test_4
+        fake_rsync = [sys.executable, "-c",
+                      "import sys,time\n"
+                      "for p in (10,60,100):\n"
+                      "  sys.stdout.write(f'  {p*3:,} {p}%  1.00MB/s  0:00:01\\r'); sys.stdout.flush(); time.sleep(0.15)\n"]
+        ejected, mounted = [], []
+
+        with mock.patch.object(app.usb, "list_devices", return_value=[]):
+            self.assertEqual(c.get("/usb/devices").json()["devices"], [])
+            r = c.post(f"/scans/{scan}/usb", json={})
+            self.assertEqual(r.status_code, 409)
+            self.assertIn("aucune clé", r.json()["detail"])
+            self.assertIsNone(next(s for s in c.get("/scans").json()["scans"] if s["name"] == scan)["usb"])
+
+        stick = self._stick(free=10**9)
+        unmounted = dataclasses.replace(stick, mountpoint=None, free=None)
+        with mock.patch.object(app.usb, "list_devices", return_value=[unmounted]), \
+             mock.patch.object(app.usb, "mount", side_effect=lambda d: mounted.append(d.device)):
+            self.assertEqual(c.post("/usb/mount", json={"device": "/dev/sda1"}).status_code, 200)
+            self.assertEqual(mounted, ["/dev/sda1"])
+            self.assertEqual(c.post("/usb/mount", json={"device": "/dev/nvme0n1p1"}).status_code, 404)
+
+        with mock.patch.object(app.usb, "list_devices", return_value=[stick]), \
+             mock.patch.object(app.usb, "rsync_argv", return_value=fake_rsync), \
+             mock.patch.object(app.usb, "eject", side_effect=lambda d: ejected.append(d.device)):
+            plan = c.get(f"/scans/{scan}/usb").json()
+            self.assertTrue(plan["ok"], plan)
+            self.assertGreater(plan["bytes_total"], 0)
+            self.assertEqual(plan["device"]["name"], "ESD-USB")
+            row = next(s for s in c.get("/scans").json()["scans"] if s["name"] == scan)
+            self.assertEqual(row["usb"], {"present": False, "stick": "ESD-USB"})
+
+            r = c.post(f"/scans/{scan}/usb", json={})
+            self.assertEqual(r.status_code, 200, r.text)
+            self.assertEqual(r.json()["state"], "copying")
+            # guards while copying
+            self.assertEqual(c.post(f"/scans/{scan}/usb", json={}).status_code, 409)
+            r = self.start(location="PendantCopie")
+            self.assertEqual(r.status_code, 423)
+            self.assertIn("transfert USB", r.json()["detail"])
+            self.assertEqual(self.spawned, [])
+            self.assertEqual(c.post("/system/shutdown").status_code, 423)
+            self.assertEqual(c.post("/usb/eject", json={}).status_code, 409)
+
+            for _ in range(100):
+                s = c.get("/usb/transfer").json()
+                if s["state"] not in ("copying", "syncing"):
+                    break
+                time.sleep(0.05)
+            self.assertEqual((s["state"], s["percent"], s["scan"]), ("done", 100, scan), s)
+            self.assertEqual(c.post("/usb/eject", json={}).json()["name"], "ESD-USB")
+            self.assertEqual(ejected, ["/dev/sda1"])
+
+        with mock.patch.object(app.usb, "list_devices", return_value=[self._stick(free=10)]):
+            r = c.post(f"/scans/{scan}/usb", json={})
+            self.assertEqual(r.status_code, 422)
+            self.assertIn("pas assez de place", r.json()["detail"]["msg"])
+
 
 if __name__ == "__main__":
     unittest.main()

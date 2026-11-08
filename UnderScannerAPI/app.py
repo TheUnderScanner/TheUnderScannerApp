@@ -91,6 +91,7 @@ from sensor_msgs.msg import PointCloud2
 from sensor_msgs_py import point_cloud2
 
 import slamcfg as sc      # SLAM algo registry + config profiles (pure Python, unit-tested)
+import usbcopy as usb     # USB stick listing / mounting / scan copy (pure Python, unit-tested)
 
 # ----------------------------- config -----------------------------
 DATA_ROOT = Path(os.environ.get("UNDERSCANNER_DATA", "/data/underscanner"))
@@ -117,6 +118,8 @@ ALGOS = [
 ]
 ALGO_BY_ID = {a.id: a for a in ALGOS}
 PROFILES = sc.ProfileStore(SLAM_ROOT, ALGOS, log=lambda m: print(m, flush=True))
+
+USB = usb.Transfer()      # the (single) scan -> USB stick copy job
 
 VOXEL    = 0.10     # preview downsample size (m); larger = sparser/lighter
 CLOUD_HZ = 4        # preview cloud frames/sec to the phone
@@ -678,6 +681,8 @@ def scan_slam_meta(name: str) -> dict | None:
 @app.get("/scans")
 def list_scans():
     out = []
+    # With a stick mounted, each row says whether the scan is already on it (same sizes).
+    stick = next((d for d in usb.list_devices() if d.mountpoint), None)
     for name in collect_scan_names():
         bag, pcd = BAGS / name, MAPS / f"{name}.pcd"
         cfg, note = CONFIGS / f"{name}.yaml", NOTES / f"{name}.json"
@@ -700,7 +705,9 @@ def list_scans():
                     "config":{"present":cfg.exists()},"notes":{"present":note.exists(), "text": note_text},
                     "trajectory":{"present":traj.exists()},
                     "health":{"present":hlog.exists(),"size_bytes":hs,"size_human":human(hs)},
-                    "slam":scan_slam_meta(name)})
+                    "slam":scan_slam_meta(name),
+                    "usb":{"present":usb.is_on_stick(DATA_ROOT, scan_artifacts(name), stick.mountpoint),
+                           "stick":stick.name} if stick else None})
     return {"scans": out}
 
 @app.get("/scans/{name}/pcd")
@@ -1071,6 +1078,11 @@ async def scan_start(request: Request):
     if not isinstance(body, dict):
         body = {}
 
+    # A USB copy and a recording would fight over the NVMe: refuse. 423, not 409 — the app
+    # reads any 409 here as "a scan is already running, resume it".
+    if USB.active:
+        raise HTTPException(423, "transfert USB en cours : attends la fin ou annule-le")
+
     # Resolve + validate the SLAM config before claiming the device: a typo in the
     # overrides costs nothing and never spawns a process.
     algo, profile, profile_text = _slam_errors(PROFILES.resolve, body.get("algo"), body.get("profile"))
@@ -1207,8 +1219,110 @@ def system_shutdown():
     with S.lock:
         if S.running or S.starting:
             raise HTTPException(409, "stop the scan before shutting down")
+    if USB.active:
+        raise HTTPException(423, "transfert USB en cours : attends la fin ou annule-le")
+    for d in usb.list_devices():                 # flush + unmount sticks before power is cut
+        if d.mountpoint:
+            try: usb.eject(d)
+            except usb.UsbError: pass
     subprocess.Popen(["sudo", "/usr/sbin/shutdown", "-h", "now"])
     return {"ok": True, "message": "shutting down"}
+
+
+# ------------------------------- USB STICK -------------------------------
+# A stick plugged into the Jetson, mounted through udisks2 (no sudo; one-time polkit grant:
+# UnderScannerAPI/system/50-underscanner-usb.pkla). One scan copy at a time, run by rsync in
+# the background (usbcopy.Transfer); the app polls GET /usb/transfer for the progress bar.
+# Refusals that the user must read come back as {"detail": "<French message>"}.
+def _usb_pick(device: str | None) -> usb.UsbDevice:
+    """The stick to act on: [device] if given, else the only mounted one."""
+    devs = usb.list_devices()
+    if device:
+        d = next((x for x in devs if x.device == device), None)
+        if d is None:
+            raise HTTPException(404, "clé introuvable (débranchée ?)")
+        return d
+    mounted = [x for x in devs if x.mountpoint]
+    if not mounted:
+        raise HTTPException(409, "aucune clé USB montée : monte-la depuis la salle de contrôle")
+    if len(mounted) > 1:
+        raise HTTPException(409, "plusieurs clés montées : précise laquelle")
+    return mounted[0]
+
+def _usb_errors(fn, *args):
+    try:
+        return fn(*args)
+    except usb.UsbError as e:
+        raise HTTPException(500, str(e))
+
+@app.get("/usb/devices")
+def usb_devices():
+    return {"devices": [d.as_dict() for d in usb.list_devices()], "transfer": USB.snapshot()}
+
+@app.post("/usb/mount")
+async def usb_mount(request: Request):
+    """Body {device}: mount that stick (it must be a USB filesystem from /usb/devices)."""
+    device = (await _json_body(request)).get("device")
+    if not isinstance(device, str) or not device:
+        raise HTTPException(400, "device attendu (ex. /dev/sda1)")
+    d = await asyncio.to_thread(_usb_pick, device)
+    await asyncio.to_thread(_usb_errors, usb.mount, d)
+    d = await asyncio.to_thread(_usb_pick, device)
+    return d.as_dict()
+
+@app.post("/usb/eject")
+async def usb_eject(request: Request):
+    """Body {device?}: flush, unmount and power off (then the stick can be pulled)."""
+    if USB.active:
+        raise HTTPException(409, "transfert en cours : attends la fin ou annule-le")
+    try:
+        device = (await request.json() or {}).get("device")
+    except Exception:
+        device = None
+    d = await asyncio.to_thread(_usb_pick, device)
+    await asyncio.to_thread(_usb_errors, usb.eject, d)
+    return {"ok": True, "device": d.device, "name": d.name}
+
+@app.get("/scans/{name}/usb")
+def scan_usb_plan(name: str, device: str | None = None):
+    """Dry run: what copying this scan to the stick involves, and whether it can work
+    ({ok, problems, already, bytes_total, bytes_needed, ...} + the stick)."""
+    safe(name)
+    d = _usb_pick(device)
+    return dict(usb.plan(DATA_ROOT, scan_artifacts(name), d).as_dict(), device=d.as_dict())
+
+@app.post("/scans/{name}/usb")
+async def scan_usb_copy(name: str, request: Request):
+    """Start copying every artifact of the scan to the mounted stick (body {device?}).
+    409: scan running / transfer running / no stick; 422 {detail: {msg, problems}} when the
+    copy can't work (file > 4 GiB on FAT32, not enough space, read-only stick)."""
+    safe(name)
+    with S.lock:
+        if S.running or S.starting:
+            raise HTTPException(409, "un scan est en cours : arrête-le avant de copier")
+    if USB.active:
+        raise HTTPException(409, "un transfert est déjà en cours")
+    try:
+        device = (await request.json() or {}).get("device")
+    except Exception:
+        device = None
+    d = await asyncio.to_thread(_usb_pick, device)
+    p = await asyncio.to_thread(usb.plan, DATA_ROOT, scan_artifacts(name), d)
+    if not p.ok:
+        raise HTTPException(422, {"msg": p.problems[0], "problems": p.problems})
+    try:
+        USB.start(name, d, p, usb.rsync_argv(DATA_ROOT, p.rels, d.mountpoint))
+    except usb.UsbError as e:
+        raise HTTPException(409, str(e))
+    return USB.snapshot()
+
+@app.get("/usb/transfer")
+def usb_transfer():
+    return USB.snapshot()
+
+@app.delete("/usb/transfer")
+def usb_transfer_cancel():
+    return {"ok": USB.cancel()}
 
 
 

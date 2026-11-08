@@ -30,7 +30,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent $PSScriptRoot
-$Files = @("app.py", "slamcfg.py")       # under UnderScannerAPI/ locally, underscanner-api/ remotely
+$Files = @("app.py", "slamcfg.py", "usbcopy.py")   # under UnderScannerAPI/ locally, underscanner-api/ remotely
 $RemoteDir = "underscanner-api"          # relative to home: the Jetson's SFTP rejects absolute paths
 $Target = "$User@$JetsonHost"
 $Api = "http://${JetsonHost}:8000"

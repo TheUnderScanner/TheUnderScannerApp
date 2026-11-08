@@ -1,0 +1,24 @@
+{
+   "blockdevices": [
+      {"name": "loop9", "path": "/dev/loop9", "type": "loop", "size": 16777216, "fstype": "vfat",
+       "fsver": "FAT16", "label": "L4T-README", "model": null, "vendor": null, "tran": null,
+       "rm": false, "hotplug": false, "mountpoint": null, "fsavail": null},
+      {"name": "sda", "path": "/dev/sda", "type": "disk", "size": 31260704768, "fstype": null,
+       "fsver": null, "label": null, "model": "Cruzer Force", "vendor": "SanDisk ", "tran": "usb",
+       "rm": true, "hotplug": true, "mountpoint": null, "fsavail": null,
+       "children": [
+          {"name": "sda1", "path": "/dev/sda1", "type": "part", "size": 31259099136,
+           "fstype": "vfat", "fsver": "FAT32", "label": "ESD-USB", "model": null, "vendor": null,
+           "tran": null, "rm": true, "hotplug": true, "mountpoint": null, "fsavail": null}
+       ]},
+      {"name": "nvme0n1", "path": "/dev/nvme0n1", "type": "disk", "size": 240057409536,
+       "fstype": null, "fsver": null, "label": null, "model": "Force MP510", "vendor": null,
+       "tran": "nvme", "rm": false, "hotplug": false, "mountpoint": null, "fsavail": null,
+       "children": [
+          {"name": "nvme0n1p1", "path": "/dev/nvme0n1p1", "type": "part", "size": 238495764480,
+           "fstype": "ext4", "fsver": "1.0", "label": null, "model": null, "vendor": null,
+           "tran": "nvme", "rm": false, "hotplug": false, "mountpoint": "/",
+           "fsavail": "181748334592"}
+       ]}
+   ]
+}

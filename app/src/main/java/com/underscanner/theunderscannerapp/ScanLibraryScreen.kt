@@ -36,6 +36,7 @@ import org.json.JSONObject
 @Composable
 fun ScanLibraryScreen(
     viewModel: ScanLibraryViewModel,
+    usbViewModel: UsbViewModel,
     onOpenPcd: (scanName: String) -> Unit,
     onOpenHealth: (scanName: String) -> Unit,
     onOpenSettings: () -> Unit,
@@ -62,6 +63,25 @@ fun ScanLibraryScreen(
     LaunchedEffect(Unit) { viewModel.refresh() }
 
     val isConnected = connection is ConnectionState.Connected
+
+    // USB stick on the Jetson: per-scan copy button + progress bar.
+    DisposableEffect(Unit) {
+        usbViewModel.startPolling()
+        onDispose { usbViewModel.stopPolling() }
+    }
+    val usbTransfer = usbViewModel.transfer
+    val usbStick = usbViewModel.mounted
+    var usbCopyScan by remember { mutableStateOf<String?>(null) }
+    // The rows' "Sur la clé ✓" comes from /scans: re-read it when a copy ends or the
+    // mounted stick changes (skipping the first composition, already covered above).
+    var usbSeen by remember { mutableStateOf<Pair<String?, String?>?>(null) }
+    LaunchedEffect(usbTransfer.state, usbStick?.device) {
+        val now = usbTransfer.state to usbStick?.device
+        val before = usbSeen
+        usbSeen = now
+        if (before != null && before != now &&
+            (usbTransfer.state == "done" || before.second != now.second)) viewModel.refresh()
+    }
 
     // Dialog state
     var notesScan by remember { mutableStateOf<ScanInfo?>(null) }
@@ -233,6 +253,20 @@ fun ScanLibraryScreen(
                                 onViewConfig = { configScan = scan },
                                 canRename = viewModel.canRename(scan),
                                 onRename = { renameScan = scan },
+                                usbSupported = usbViewModel.supported,
+                                usbTransfer = usbViewModel.visibleTransfer?.takeIf { it.scan == scan.name },
+                                usbEnabled = isConnected && !usbTransfer.active,
+                                onUsb = {
+                                    if (usbStick == null) {
+                                        Toast.makeText(
+                                            context,
+                                            "Aucune clé montée : branche-la sur le Jetson, puis " +
+                                                "« Monter » dans la salle de contrôle.",
+                                            Toast.LENGTH_LONG
+                                        ).show()
+                                    } else usbCopyScan = scan.name
+                                },
+                                onCancelUsb = { usbViewModel.cancelCopy() },
                                 onOpenHealth = {
                                     viewModel.openHealthLog(
                                         scanName = scan.name,
@@ -273,6 +307,10 @@ fun ScanLibraryScreen(
             onDismiss = { renameScan = null }
         )
     }
+
+    usbCopyScan?.let { name ->
+        UsbCopyDialog(scan = name, usb = usbViewModel, onDismiss = { usbCopyScan = null })
+    }
 }
 
 @Composable
@@ -309,8 +347,15 @@ private fun ScanRow(
     onViewConfig: () -> Unit,
     canRename: Boolean,
     onRename: () -> Unit,
+    usbSupported: Boolean,
+    usbTransfer: UsbTransfer?,      // the copy job, when it concerns this scan
+    usbEnabled: Boolean,
+    onUsb: () -> Unit,
+    onCancelUsb: () -> Unit,
     onOpenHealth: () -> Unit
 ) {
+    // Five 48 dp icon buttons + the PCD button overflow a phone-width card: 40 dp each.
+    val iconBtn = Modifier.size(40.dp)
     ElevatedCard(modifier = Modifier.fillMaxWidth()) {
         Column(Modifier.padding(16.dp)) {
             // Title + subtitle
@@ -342,14 +387,29 @@ private fun ScanRow(
 
             Spacer(Modifier.height(8.dp))
 
-            // Info line: bag + pcd sizes
+            // Info line: bag + pcd sizes (+ on the mounted USB stick)
             val info = buildList {
                 if (scan.bag.present) add("Bag ${scan.bag.sizeHuman}")
                 if (scan.pcd.present) add("PCD ${scan.pcd.sizeHuman}")
             }.joinToString("   ·   ")
-            if (info.isNotEmpty()) {
-                Text(info, style = MaterialTheme.typography.bodySmall)
+            if (info.isNotEmpty() || scan.usb?.present == true) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(info, style = MaterialTheme.typography.bodySmall, modifier = Modifier.weight(1f))
+                    if (scan.usb?.present == true) {
+                        Icon(Icons.Default.Usb, null, Modifier.size(14.dp),
+                            tint = MaterialTheme.colorScheme.primary)
+                        Spacer(Modifier.width(2.dp))
+                        Text("Sur ${scan.usb.stick} ✓", style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.primary)
+                    }
+                }
                 Spacer(Modifier.height(8.dp))
+            }
+
+            // USB copy progress (driven by the Jetson's copy job)
+            if (usbTransfer != null) {
+                UsbTransferBar(usbTransfer, onCancel = onCancelUsb)
+                Spacer(Modifier.height(4.dp))
             }
 
             // Download progress
@@ -398,8 +458,18 @@ private fun ScanRow(
                 // Rename (date / location / run). Online only — the Jetson's files are renamed —
                 // and never for a local-only scan, which has no server side to rename.
                 if (!scan.localOnly) {
-                    IconButton(onClick = onRename, enabled = canRename) {
+                    IconButton(onClick = onRename, enabled = canRename, modifier = iconBtn) {
                         Icon(Icons.Default.Edit, contentDescription = "Renommer")
+                    }
+                }
+                // Copy to the USB stick plugged into the Jetson (server scans only).
+                if (!scan.localOnly && usbSupported) {
+                    IconButton(onClick = onUsb, enabled = usbEnabled, modifier = iconBtn) {
+                        UsbSendIcon(
+                            tint = if (!usbEnabled) LocalContentColor.current.copy(alpha = 0.38f)
+                                   else if (scan.usb?.present == true) MaterialTheme.colorScheme.primary
+                                   else LocalContentColor.current
+                        )
                     }
                 }
                 // Health charts. Enabled once the log is on the phone (works offline) or
@@ -407,19 +477,20 @@ private fun ScanRow(
                 if (scan.health.present || scan.healthLocal) {
                     IconButton(
                         onClick = onOpenHealth,
-                        enabled = scan.healthLocal || isConnected
+                        enabled = scan.healthLocal || isConnected,
+                        modifier = iconBtn
                     ) {
                         Icon(Icons.Default.Timeline, contentDescription = "Courbes de santé")
                     }
                 }
                 // Config (read-only, online)
                 if (scan.config.present) {
-                    IconButton(onClick = onViewConfig, enabled = isConnected) {
+                    IconButton(onClick = onViewConfig, enabled = isConnected, modifier = iconBtn) {
                         Icon(Icons.Default.Description, contentDescription = "Voir la config")
                     }
                 }
                 // Notes (edit, online)
-                IconButton(onClick = onEditNotes, enabled = isConnected) {
+                IconButton(onClick = onEditNotes, enabled = isConnected, modifier = iconBtn) {
                     Icon(
                         if (scan.notes.present) Icons.Default.EditNote else Icons.AutoMirrored.Filled.NoteAdd,
                         contentDescription = "Notes"

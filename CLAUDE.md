@@ -22,7 +22,7 @@ Durations keep the raw clock. The system clock is deliberately **not** set
 stay on the Jetson clock. The offset lives in memory: after a backend restart it's 0 until
 the phone's next `/status` poll re-syncs it.
 **Backend deploys:** `UnderScannerAPI/deploy-backend.ps1` deploys the committed HEAD blobs of
-every file in its `$Files` list (`app.py`, `slamcfg.py` — add new backend modules there). It
+every file in its `$Files` list (`app.py`, `slamcfg.py`, `usbcopy.py` — add new backend modules there). It
 refuses if a Jetson file isn't found in that path's git history (= edited on the Jetson); a file
 absent on the Jetson is accepted as new. **Backend tests:** `slamcfg.py` is pure Python + PyYAML
 (no ROS): `python -m unittest discover -s UnderScannerAPI/tests` (needs `pip install pyyaml`;
@@ -110,6 +110,31 @@ the address is fixed). The base URL stays editable in the app's Settings; defaul
 | GET/PUT/DELETE | `/slam/{algo}/profiles/{name}` | Profile YAML (`text/plain`) | PUT validates + normalizes → `{ok, name, text, issues}`; **422** invalid; **403** `usine`; DELETE **409** if default |
 | POST | `/slam/{algo}/profiles/{name}/copy` · `/rename` | body `{to}` | **409** name taken, **403** `usine` |
 | POST | `/slam/{algo}/validate` | Dry run; body `{yaml? \| profile?, overrides?}` | always 200: `{ok, issues:[{level,msg,line,where}], normalized?, effective?, overrides?}` |
+| GET | `/usb/devices` | USB sticks on the Jetson + copy job | `{devices:[{device, disk, name, label, model, vendor, size, fstype, fsver, mounted, mountpoint, free, max_file}], transfer}` |
+| POST | `/usb/mount` | body `{device}` (must be a USB filesystem) | the device; **404** unknown, **500** udisks error |
+| POST | `/usb/eject` | body `{device?}`: sync + unmount + power-off | `{ok, device, name}`; **409** during a copy |
+| GET | `/scans/{name}/usb` | Copy dry run | `{ok, problems, already, bytes_total, bytes_needed, …, device}` |
+| POST | `/scans/{name}/usb` | Copy the whole scan to the mounted stick | transfer snapshot; **409** scan running / copy running / no stick; **422** `{detail:{msg, problems}}` (FAT32 file > 4 GiB, no space, read-only) |
+| GET/DELETE | `/usb/transfer` | Copy progress / cancel | `{state: idle\|copying\|syncing\|done\|error\|cancelled, scan, label, bytes_done, bytes_total, percent, rate_bps, eta_s, error}` |
+
+`/scan/start` and `/system/shutdown` answer **423** while a USB copy runs (not 409: the app reads a
+409 from `/scan/start` as "a scan is already running → resume"). Shutdown ejects mounted sticks first.
+`/scans` rows carry `usb: {present, stick}` when a stick is mounted (null otherwise).
+
+**USB stick copy (`usbcopy.py`).** Sticks plugged into the Jetson are listed with `lsblk -J`
+(only filesystems on `tran=usb` disks — internal disks can't be mounted through the API) and
+mounted through **udisks2** (`udisksctl … --no-user-interaction`, under `/media/orin4slam/<LABEL>`,
+owned by the backend user — no sudo). That needs a one-time polkit grant: polkit is **0.105** on
+the Jetson, so it is a `.pkla` file, versioned in `UnderScannerAPI/system/50-underscanner-usb.pkla`
+(removable drives only; install steps in `UnderScannerAPI/ReadMe.md`). A copy = one rsync run of
+every artifact (`scan_artifacts()`), `-rtR --modify-window=1 --no-inc-recursive --info=progress2`:
+`-R` keeps `underscanner/bags/…`, `underscanner/maps/…` on the stick (Jetson layout), `-rt` not
+`-a` (FAT stores no owner/perms), `--modify-window=1` (FAT mtimes are 2 s; without it everything
+is re-copied). `plan()` refuses up front — and says why — a FAT32 file > 4 GiB or more data than
+the free space (files already there with the same size don't count). `Transfer` runs rsync in a
+thread, parses progress2, then `sync`s ("syncing") before "done"; cancel = SIGTERM. One copy at a
+time; copying is **copy, not move** (deleting from the Jetson is a later, separate feature).
+`list_devices()` never raises (no lsblk = no stick) since `/scans` calls it.
 | WS | `/ws/preview` | Live preview stream | binary cloud frames + JSON pose / `hello`; client → `client_stats` |
 | POST | `/system/shutdown` | Power the Jetson off | `{ok}`; **409** if a scan is running or starting |
 
@@ -305,6 +330,20 @@ drawn as a yellow polyline (`Trajectory.kt` + `MyGLRenderer.drawTrajectory`, `GL
   delete, each reporting a message), editor calls (load / validate / save) and
   `validateForScan`. Keeps no copy of the profiles: everything goes through `/slam`, so it needs
   the Jetson. `nameProblem()` = a light client check of profile names (backend is authoritative).
+
+- **UsbViewModel.kt** — fourth NavHost-hoisted VM: USB sticks on the Jetson + the copy job.
+  Polls `/usb/devices` (1 s during a copy, else 3 s), reference-counted between the Library and
+  the Control Room. `supported = false` on a 404 (older backend) hides the USB UI.
+  `visibleTransfer` only surfaces a *finished* job if this app saw it run (the backend keeps the
+  last result forever). Errors carry the backend's French `detail` (`HttpStatusException`).
+
+- **UsbUi.kt** — `UsbSendIcon` (USB plug + arrow), `UsbCard` (Control Room: sticks with
+  name/model/size/fs, **Monter** / **Éjecter** → "tu peux retirer la clé", FAT32 4 GB note, the
+  running copy), `UsbTransferBar` (the horizontal bar + % · rate · time left + Annuler, on the scan
+  card), `UsbCopyDialog` (Library: size, what's already on the stick, free space, and the
+  backend's refusal reasons; *Copier* disabled when the plan isn't ok). In the Library each server
+  scan has the USB button (icon buttons are 40 dp so five fit on a phone card); a scan already on
+  the mounted stick shows "Sur <clé> ✓". The Control Room's *Nouveau scan* is disabled during a copy.
 
 - **SlamScreens.kt** — `SlamProfilesScreen` (route `slamProfiles`: one card per profile, `usine`
   locked, default badge, per-row menu, FAB = new profile as a copy of `usine`) and

@@ -96,6 +96,7 @@ fun AppNavHost() {
     val libraryViewModel: ScanLibraryViewModel = viewModel()
     val controlViewModel: ScanControlViewModel = viewModel()
     val slamViewModel: SlamViewModel = viewModel()
+    val usbViewModel: UsbViewModel = viewModel()
 
     NavHost(navController = navController, startDestination = "mainMenu") {
         composable("mainMenu") {
@@ -113,6 +114,7 @@ fun AppNavHost() {
             val openNotes = backStackEntry.arguments?.getString("openNotes").orEmpty()
             ScanLibraryScreen(
                 viewModel = libraryViewModel,
+                usbViewModel = usbViewModel,
                 openNotesFor = openNotes.ifBlank { null },
                 onOpenPcd = { scanName -> navController.navigate("pcdViewer/$scanName.pcd") },
                 onOpenHealth = { scanName -> navController.navigate("healthChart/$scanName") },
@@ -176,6 +178,7 @@ fun AppNavHost() {
             ControlRoomScreen(
                 viewModel = controlViewModel,
                 slamViewModel = slamViewModel,
+                usbViewModel = usbViewModel,
                 onBack = { navController.popBackStack() },
                 onOpenSettings = { navController.navigate("settings") },
                 onOpenActive = { navController.navigate("activeScan") }

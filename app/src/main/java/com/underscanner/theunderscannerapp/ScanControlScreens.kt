@@ -40,6 +40,7 @@ private fun formatElapsed(s: Long): String = "%d:%02d".format(s / 60, s % 60)
 fun ControlRoomScreen(
     viewModel: ScanControlViewModel,
     slamViewModel: SlamViewModel,
+    usbViewModel: UsbViewModel,
     onBack: () -> Unit,
     onOpenSettings: () -> Unit,
     onOpenActive: () -> Unit
@@ -53,12 +54,17 @@ fun ControlRoomScreen(
 
     DisposableEffect(Unit) {
         viewModel.startPolling()
-        onDispose { viewModel.stopPolling() }
+        usbViewModel.startPolling()
+        onDispose {
+            viewModel.stopPolling()
+            usbViewModel.stopPolling()
+        }
     }
 
     val isConnected = connection is ConnectionState.Connected
     val running = scanStatus?.running == true
     val starting = phase == ControlPhase.Starting
+    val usbCopying = usbViewModel.transfer.active
     var showStartDialog by remember { mutableStateOf(false) }
     var showShutdownDialog by remember { mutableStateOf(false) }
     var showSshDialog by remember { mutableStateOf(false) }
@@ -89,6 +95,7 @@ fun ControlRoomScreen(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(padding)
+                .verticalScroll(rememberScrollState())
                 .padding(24.dp),
             verticalArrangement = Arrangement.spacedBy(20.dp),
             horizontalAlignment = Alignment.CenterHorizontally
@@ -156,7 +163,7 @@ fun ControlRoomScreen(
 
             Button(
                 onClick = { showStartDialog = true },
-                enabled = isConnected && !running && !shuttingDown && !starting,
+                enabled = isConnected && !running && !shuttingDown && !starting && !usbCopying,
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(64.dp)
@@ -182,13 +189,20 @@ fun ControlRoomScreen(
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
+            } else if (usbCopying && !running) {
+                Text(
+                    "Copie USB en cours : un scan ne peut pas démarrer avant la fin (ou annule-la).",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
             }
 
             if (!shuttingDown) {
                 JetsonHealthCard(health = health, stale = !isConnected)
+                UsbCard(usb = usbViewModel, connected = isConnected, scanRunning = running || starting)
             }
 
-            Spacer(Modifier.weight(1f))
+            Spacer(Modifier.height(8.dp))
 
             // Secondary / utility actions, visually separated from the primary "Nouveau scan".
             OutlinedButton(

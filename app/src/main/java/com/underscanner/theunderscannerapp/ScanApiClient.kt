@@ -269,11 +269,13 @@ class ScanApiClient(initialBaseUrl: String) {
     // SLAM algos + config profiles (/slam/...)
     // -----------------------------------------------------------------------
 
-    /** `<base>/slam/<segments…>`, each segment URL-encoded (profile names may hold accents). */
-    private fun slamUrl(vararg segments: String): HttpUrl =
-        "$baseUrl/".toHttpUrl().newBuilder().addPathSegment("slam")
+    /** `<base>/<segments…>`, each segment URL-encoded (names may hold accents or dots). */
+    private fun apiUrl(vararg segments: String): HttpUrl =
+        "$baseUrl/".toHttpUrl().newBuilder()
             .apply { segments.forEach { addPathSegment(it) } }
             .build()
+
+    private fun slamUrl(vararg segments: String): HttpUrl = apiUrl("slam", *segments)
 
     private suspend fun <T> slamCall(
         url: HttpUrl,
@@ -341,9 +343,50 @@ class ScanApiClient(initialBaseUrl: String) {
             if (!overrides.isNullOrBlank()) put("overrides", overrides)
         }.toString().toRequestBody(JSON)) { SlamValidation.from(JSONObject(it)) }
 
+    // -----------------------------------------------------------------------
+    // USB stick on the Jetson (/usb/..., /scans/{name}/usb)
+    // -----------------------------------------------------------------------
+
+    /** Plugged-in sticks + the current copy job. A 404 = backend without USB support. */
+    suspend fun getUsbDevices(): Result<Pair<List<UsbDevice>, UsbTransfer>> =
+        slamCall(apiUrl("usb", "devices")) { text ->
+            val o = JSONObject(text)
+            val arr = o.optJSONArray("devices") ?: JSONArray()
+            (0 until arr.length()).mapNotNull { arr.optJSONObject(it)?.let(UsbDevice::from) } to
+                UsbTransfer.from(o.optJSONObject("transfer"))
+        }
+
+    suspend fun mountUsb(device: String): Result<UsbDevice> =
+        slamCall(apiUrl("usb", "mount"), "POST",
+            JSONObject().put("device", device).toString().toRequestBody(JSON)) {
+            UsbDevice.from(JSONObject(it))
+        }
+
+    /** Flush, unmount and power off the stick (it can then be pulled out). */
+    suspend fun ejectUsb(device: String?): Result<Unit> =
+        slamCall(apiUrl("usb", "eject"), "POST", JSONObject().apply {
+            if (device != null) put("device", device)
+        }.toString().toRequestBody(JSON)) { }
+
+    /** Dry run: size, what's already there, and why the copy can't work (if it can't). */
+    suspend fun getUsbPlan(scan: String): Result<UsbPlan> =
+        slamCall(apiUrl("scans", scan, "usb")) { UsbPlan.from(JSONObject(it)) }
+
+    suspend fun startUsbCopy(scan: String): Result<UsbTransfer> =
+        slamCall(apiUrl("scans", scan, "usb"), "POST", "{}".toRequestBody(JSON)) {
+            UsbTransfer.from(JSONObject(it))
+        }
+
+    suspend fun getUsbTransfer(): Result<UsbTransfer> =
+        slamCall(apiUrl("usb", "transfer")) { UsbTransfer.from(JSONObject(it)) }
+
+    suspend fun cancelUsbTransfer(): Result<Unit> =
+        slamCall(apiUrl("usb", "transfer"), "DELETE") { }
+
     /**
      * The response body, or a typed failure: a 422 whose `detail` carries `issues` becomes a
-     * [SlamConfigException]; anything else an IOException with the backend's `detail` text.
+     * [SlamConfigException]; anything else an [HttpStatusException] (an IOException) with the
+     * backend's `detail` text — `detail.msg` when detail is an object.
      */
     private fun bodyOrThrow(response: Response): String {
         val text = response.body?.string().orEmpty()
@@ -353,9 +396,10 @@ class ScanApiClient(initialBaseUrl: String) {
             val msg = detail.optString("msg", "").ifBlank { "HTTP ${response.code}" }
             val issues = SlamIssue.list(detail.optJSONArray("issues"))
             if (issues.isNotEmpty()) throw SlamConfigException(issues, msg)
-            throw IOException(msg)
+            throw HttpStatusException(response.code, msg)
         }
-        throw IOException((detail as? String)?.ifBlank { null } ?: "HTTP ${response.code}")
+        throw HttpStatusException(response.code,
+            (detail as? String)?.ifBlank { null } ?: "HTTP ${response.code}")
     }
 
     /** POST /scan/stop — stop + save. Fails with [NoScanRunningException] on 409. */
@@ -382,7 +426,7 @@ class ScanApiClient(initialBaseUrl: String) {
             client.newCall(Request.Builder().url("$baseUrl/system/shutdown").post(body).build())
                 .execute().use { response ->
                     if (response.code == 409) throw ScanAlreadyRunningException()
-                    if (!response.isSuccessful) throw IOException("HTTP ${response.code}")
+                    bodyOrThrow(response)     // e.g. 423 "transfert USB en cours"
                     Unit
                 }
         }

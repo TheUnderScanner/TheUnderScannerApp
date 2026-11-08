@@ -52,6 +52,8 @@ data class ScanInfo(
     val notesText: String = "",
     /** Which SLAM algo/profile/overrides produced the scan; null for pre-profile scans. */
     val slam: SlamMeta? = null,
+    /** Whether the scan is on the USB stick mounted on the Jetson; null when none is mounted. */
+    val usb: UsbPresence? = null,
     val downloadedLocally: Boolean = false,
     /** Whether this scan's health log is on the phone — charts then work offline. */
     val healthLocal: Boolean = false,
@@ -69,7 +71,114 @@ data class ScanInfo(
             notes = ScanArtifact.from(obj.optJSONObject("notes")),
             health = ScanArtifact.from(obj.optJSONObject("health")),
             notesText = flattenJsonText(obj.optJSONObject("notes")),
-            slam = SlamMeta.from(obj.optJSONObject("slam"))
+            slam = SlamMeta.from(obj.optJSONObject("slam")),
+            usb = obj.optJSONObject("usb")?.let {
+                UsbPresence(it.optBoolean("present", false), it.optString("stick", ""))
+            }
+        )
+    }
+}
+
+data class UsbPresence(val present: Boolean, val stick: String)
+
+// ---------------------------------------------------------------------------
+// USB stick on the Jetson (`/usb/...`, `/scans/{name}/usb`)
+// ---------------------------------------------------------------------------
+
+data class UsbDevice(
+    val device: String,         // /dev/sda1
+    val name: String,           // label, else vendor + model
+    val model: String?,
+    val vendor: String?,
+    val size: Long,
+    val sizeHuman: String,
+    val fstype: String,
+    val fsver: String?,
+    val mounted: Boolean,
+    val free: Long?,
+    val freeHuman: String?
+) {
+    val isFat32: Boolean get() = fstype == "vfat"
+
+    /** "FAT32", "EXFAT", "NTFS"… */
+    val fsLabel: String get() = fsver ?: fstype.uppercase()
+
+    /** "SanDisk Cruzer Force · 29.1 GiB · FAT32" */
+    val details: String
+        get() = listOfNotNull(
+            listOfNotNull(vendor, model).joinToString(" ").ifBlank { null }, sizeHuman, fsLabel
+        ).joinToString(" · ")
+
+    companion object {
+        fun from(o: JSONObject) = UsbDevice(
+            device = o.optString("device"),
+            name = o.optString("name", o.optString("device")),
+            model = o.optString("model", "").ifBlank { null },
+            vendor = o.optString("vendor", "").ifBlank { null },
+            size = o.optLong("size", 0L),
+            sizeHuman = o.optString("size_human", ""),
+            fstype = o.optString("fstype", ""),
+            fsver = o.optString("fsver", "").ifBlank { null },
+            mounted = o.optBoolean("mounted", false),
+            free = if (o.isNull("free")) null else o.optLong("free"),
+            freeHuman = o.optString("free_human", "").ifBlank { null }
+        )
+    }
+}
+
+/** The (single) scan → USB copy job, as `GET /usb/transfer` reports it. */
+data class UsbTransfer(
+    val state: String,          // idle | copying | syncing | done | error | cancelled
+    val scan: String?,
+    val label: String?,
+    val bytesDone: Long,
+    val bytesTotal: Long,
+    val percent: Int,
+    val rateBps: Double?,
+    val etaS: Long?,
+    val error: String?
+) {
+    val active: Boolean get() = state == "copying" || state == "syncing"
+
+    companion object {
+        val IDLE = UsbTransfer("idle", null, null, 0, 0, 0, null, null, null)
+
+        fun from(o: JSONObject?): UsbTransfer {
+            if (o == null) return IDLE
+            return UsbTransfer(
+                state = o.optString("state", "idle"),
+                scan = o.optString("scan", "").ifBlank { null },
+                label = o.optString("label", "").ifBlank { null },
+                bytesDone = o.optLong("bytes_done", 0L),
+                bytesTotal = o.optLong("bytes_total", 0L),
+                percent = o.optInt("percent", 0),
+                rateBps = if (o.isNull("rate_bps")) null else o.optDouble("rate_bps").takeIf { !it.isNaN() },
+                etaS = if (o.isNull("eta_s")) null else o.optLong("eta_s"),
+                error = o.optString("error", "").ifBlank { null }
+            )
+        }
+    }
+}
+
+/** Dry run of copying a scan to the stick (`GET /scans/{name}/usb`). */
+data class UsbPlan(
+    val ok: Boolean,
+    val problems: List<String>,
+    val already: Boolean,
+    val totalHuman: String,
+    val neededHuman: String,
+    val bytesNeeded: Long,
+    val device: UsbDevice?
+) {
+    companion object {
+        fun from(o: JSONObject) = UsbPlan(
+            ok = o.optBoolean("ok", false),
+            problems = o.optJSONArray("problems").toStringList(),
+            already = o.optBoolean("already", false),
+            totalHuman = o.optString("total_human", ""),
+            neededHuman = o.optString("needed_human", ""),
+            bytesNeeded = o.optLong("bytes_needed", 0L),
+            device = o.optJSONObject("device")?.let(UsbDevice::from)
         )
     }
 }
@@ -346,6 +455,9 @@ data class StopResult(
         }
     }
 }
+
+/** A non-2xx answer; [message] is the backend's `detail` (French, shown to the user). */
+class HttpStatusException(val code: Int, message: String) : java.io.IOException(message)
 
 /** Typed errors so the UI can react to the backend's 409 conflicts. */
 class ScanAlreadyRunningException : Exception("Un scan est déjà en cours")
