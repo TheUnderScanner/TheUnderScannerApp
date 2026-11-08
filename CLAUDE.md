@@ -21,8 +21,12 @@ Durations keep the raw clock. The system clock is deliberately **not** set
 (would need sudo, and a jump under running ROS nodes is risky), so bag stamps / file mtimes
 stay on the Jetson clock. The offset lives in memory: after a backend restart it's 0 until
 the phone's next `/status` poll re-syncs it.
-**Backend deploys:** `UnderScannerAPI/deploy-backend.ps1` (deploys only the committed HEAD
-blob; refuses if the Jetson's file isn't found in git history = edited on the Jetson). The app browses scans, downloads point clouds, views config, edits notes, and
+**Backend deploys:** `UnderScannerAPI/deploy-backend.ps1` deploys the committed HEAD blobs of
+every file in its `$Files` list (`app.py`, `slamcfg.py` — add new backend modules there). It
+refuses if a Jetson file isn't found in that path's git history (= edited on the Jetson); a file
+absent on the Jetson is accepted as new. **Backend tests:** `slamcfg.py` is pure Python + PyYAML
+(no ROS): `python -m unittest discover -s UnderScannerAPI/tests` (needs `pip install pyyaml`;
+the Jetson has PyYAML 5.4.1 / Python 3.10, so stay within those APIs). The app browses scans, downloads point clouds, views config, edits notes, and
 visualizes `.pcd` files in a custom 3D OpenGL viewer.
 
 Current version: `v0.1.0` (Early development stage)

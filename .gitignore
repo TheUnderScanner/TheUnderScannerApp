@@ -46,3 +46,6 @@ UnderScannerAPI/app.jetson.py
 
 # Keystore files (if you generate a debug or release key)
 *.jks
+# Python (backend tests) + deploy-backend.ps1 merge copies
+__pycache__/
+UnderScannerAPI/*.jetson.py

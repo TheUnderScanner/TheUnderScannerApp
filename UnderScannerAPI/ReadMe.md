@@ -28,16 +28,24 @@ Invoke-RestMethod -Method Post http://10.42.0.1:8000/clock -ContentType applicat
 
 ## Mettre à jour le backend : le script
 
-Commite d'abord `app.py`, puis, PC connecté au point d'accès du Jetson :
+Le backend = `app.py` + `slamcfg.py` (registre des algos SLAM et profils de config ; la
+liste est `$Files` dans le script). Commite d'abord, puis, PC connecté au point d'accès du Jetson :
 ```powershell
-.\UnderScannerAPI\deploy-backend.ps1            # déploie le app.py de HEAD
+.\UnderScannerAPI\deploy-backend.ps1            # déploie les fichiers de HEAD
 .\UnderScannerAPI\deploy-backend.ps1 -DryRun    # vérifie seulement, ne change rien
 ```
-Il déploie **uniquement la version commitée** (HEAD), refuse si un scan tourne, et vérifie
-que la version actuelle du Jetson existe dans l'historique git de `app.py` (sinon quelqu'un
-l'a modifiée sur place : il s'arrête et la garde dans `UnderScannerAPI\app.jetson.py` pour
-fusion). Il contrôle la syntaxe *avant* de remplacer, garde `app.py.bak`, redémarre le
-service, et revient automatiquement à l'ancienne version si le service ne répond plus.
+Il déploie **uniquement les versions commitées** (HEAD), refuse si un scan tourne, et vérifie
+que chaque fichier du Jetson existe dans l'historique git (sinon quelqu'un l'a modifié sur
+place : il s'arrête et le garde dans `UnderScannerAPI\<nom>.jetson.py` pour fusion ; un
+fichier absent du Jetson est simplement nouveau). Il contrôle la syntaxe *avant* de
+remplacer, garde des `.bak`, redémarre le service, et revient automatiquement à l'ancienne
+version si le service ne répond plus.
+
+Tests du backend (sur le PC, sans ROS) :
+```powershell
+pip install pyyaml
+python -m unittest discover -s UnderScannerAPI/tests -v
+```
 
 **Pour ne pas taper le mot de passe 3 fois**, installer une fois une clé SSH :
 ```powershell
