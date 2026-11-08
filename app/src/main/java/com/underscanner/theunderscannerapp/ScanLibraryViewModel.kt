@@ -110,6 +110,7 @@ class ScanLibraryViewModel(app: Application) : AndroidViewModel(app) {
                 if (_connection.value !is ConnectionState.Connected) {
                     _connection.value = ConnectionState.Connected(status)
                 }
+                ClockSync.maybeSync(client, status)
                 // First time we reach the server, pull the scan list automatically.
                 if (!loadedFromServerOnce) refreshSuspending()
             },

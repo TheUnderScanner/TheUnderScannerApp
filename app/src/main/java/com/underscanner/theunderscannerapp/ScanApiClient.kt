@@ -49,6 +49,22 @@ class ScanApiClient(initialBaseUrl: String) {
         }
     }
 
+    /**
+     * POST /clock — hand the Jetson our wall-clock time (it has no NTP on its own access point).
+     * The backend keeps the offset in memory and applies it to every user-facing timestamp.
+     */
+    suspend fun syncClock(): Result<Unit> = withContext(Dispatchers.IO) {
+        runCatching {
+            val body = JSONObject().put("client_time_ms", System.currentTimeMillis())
+                .toString().toRequestBody("application/json".toMediaType())
+            client.newCall(Request.Builder().url("$baseUrl/clock").post(body).build())
+                .execute().use { response ->
+                    if (!response.isSuccessful) throw IOException("HTTP ${response.code}")
+                    Unit
+                }
+        }
+    }
+
     /** GET /scans — full scan list, newest first. Returns the raw JSON too for caching. */
     suspend fun listScans(): Result<Pair<List<ScanInfo>, String>> = withContext(Dispatchers.IO) {
         runCatching {
@@ -227,8 +243,13 @@ class ScanApiClient(initialBaseUrl: String) {
             client.newCall(Request.Builder().url("$baseUrl/scan/start").post(body).build())
                 .execute().use { response ->
                     if (response.code == 409) throw ScanAlreadyRunningException()
-                    if (!response.isSuccessful) throw IOException("HTTP ${response.code}")
-                    StartResult.from(JSONObject(response.body?.string().orEmpty().ifEmpty { "{}" }))
+                    val text = response.body?.string().orEmpty()
+                    if (!response.isSuccessful) {
+                        // Surface the backend's reason (e.g. "« slam » s'est arrêté au démarrage").
+                        val detail = runCatching { JSONObject(text).optString("detail") }.getOrNull()
+                        throw IOException(detail?.ifBlank { null } ?: "HTTP ${response.code}")
+                    }
+                    StartResult.from(JSONObject(text.ifEmpty { "{}" }))
                 }
         }
     }

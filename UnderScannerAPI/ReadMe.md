@@ -14,9 +14,17 @@ ssh orin4slam@10.42.0.1
 ```
 
 Sans internet, le Jetson n'a pas de NTP : **son horloge dérive**. L'app envoie l'heure du
-téléphone à chaque démarrage de scan ; le backend date le scan avec et corrige ses
-horodatages (`"clock_offset_s"` dans `/status` = l'écart corrigé, 0 tant qu'aucun scan n'a
-été lancé depuis le redémarrage du service).
+téléphone **dès qu'elle se connecte** (`POST /clock`, puis toutes les 10 min) et à chaque
+démarrage de scan ; le backend date le scan avec et corrige ses horodatages
+(`"clock_offset_s"` dans `/status` = l'écart corrigé ; 0 = pas encore synchronisé depuis le
+redémarrage du service, l'app resynchronise alors toute seule au prochain poll). L'horloge
+système du Jetson n'est jamais modifiée, seulement cet écart en mémoire.
+
+À la main, depuis le PC (PowerShell) :
+```powershell
+$ms = [DateTimeOffset]::Now.ToUnixTimeMilliseconds()
+Invoke-RestMethod -Method Post http://10.42.0.1:8000/clock -ContentType application/json -Body "{`"client_time_ms`": $ms}"
+```
 
 ## Mettre à jour le backend : le script
 

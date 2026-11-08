@@ -105,13 +105,20 @@ fun flattenJsonText(notes: JSONObject?): String {
 data class StatusInfo(
     val status: String,
     val hostname: String,
-    val version: String
+    val version: String,
+    /**
+     * Phone-vs-Jetson clock correction the backend applies, in seconds. `0` = not synced since
+     * the backend started (drives [ClockSync]); `null` = backend too old to report it.
+     */
+    val clockOffsetS: Float? = null
 ) {
     companion object {
         fun from(obj: JSONObject): StatusInfo = StatusInfo(
             status = obj.optString("status", "ok"),
             hostname = obj.optString("hostname", ""),
-            version = obj.optString("version", "")
+            version = obj.optString("version", ""),
+            clockOffsetS = if (obj.has("clock_offset_s") && !obj.isNull("clock_offset_s"))
+                obj.optDouble("clock_offset_s").toFloat() else null
         )
     }
 }

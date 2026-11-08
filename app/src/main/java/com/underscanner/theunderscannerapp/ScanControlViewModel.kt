@@ -144,7 +144,10 @@ class ScanControlViewModel(app: Application) : AndroidViewModel(app) {
             return
         }
         client.getStatus().fold(
-            onSuccess = { _connection.value = ConnectionState.Connected(it) },
+            onSuccess = {
+                _connection.value = ConnectionState.Connected(it)
+                ClockSync.maybeSync(client, it)
+            },
             onFailure = { _connection.value = ConnectionState.Offline(it.message ?: "Injoignable") }
         )
         client.getScanStatus().fold(

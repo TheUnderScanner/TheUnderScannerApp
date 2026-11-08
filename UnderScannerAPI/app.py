@@ -175,24 +175,27 @@ def safe(name: str) -> str:
 
 # ---- wall clock ----
 # The Jetson runs its own access point: no internet, no NTP, so its clock drifts (by days).
-# The phone sends its own time with POST /scan/start; we keep the difference and apply it
+# The phone sends its own time on connect (POST /clock) and again with POST /scan/start;
+# we keep the difference and apply it
 # to every user-facing timestamp (scan names, started_at, health header, notes). Durations
 # (elapsed, rates, health "t") keep using the raw clock, where the offset cancels out.
 # The system clock itself is never touched: no sudo, and no clock jump under running ROS.
 CLOCK_MIN_YEAR, CLOCK_MAX_YEAR = 2024, 2100   # sanity bounds for a client-sent time
 _clock = {"offset": 0.0}
 
-def set_clock_from_client(client_ms) -> None:
-    """Learn the phone-vs-Jetson clock offset from a client epoch in milliseconds."""
+def set_clock_from_client(client_ms) -> bool:
+    """Learn the phone-vs-Jetson clock offset from a client epoch in milliseconds.
+    Returns False (offset untouched) for anything that isn't a plausible epoch."""
     if not isinstance(client_ms, (int, float)) or isinstance(client_ms, bool):
-        return
+        return False
     try:
         year = datetime.datetime.fromtimestamp(client_ms / 1000).year
     except (OverflowError, OSError, ValueError):
-        return
+        return False
     if not CLOCK_MIN_YEAR <= year <= CLOCK_MAX_YEAR:
-        return
+        return False
     _clock["offset"] = client_ms / 1000 - time.time()
+    return True
 
 def wall_now() -> datetime.datetime:
     return datetime.datetime.fromtimestamp(time.time() + _clock["offset"])
@@ -234,12 +237,16 @@ def make_scan_name(location: str | None, client_date: str | None = None) -> str:
         else:
             location = "apartment"
     location = clean_location(location)
-    last = 0
-    if BAGS.is_dir():
-        for p in BAGS.glob(f"{date}_{location}_*"):
-            m = re.search(r"_(\d+)$", p.name)
-            if m: last = max(last, int(m.group(1)))
-    return f"{date}_{location}_{last + 1:02d}"
+    # Next run = highest run of this date+location across EVERY artifact kind, not just
+    # bags: a scan whose bag dir is gone (deleted to free space, failed recorder) still
+    # owns its pcd/notes/health, and reusing its number would merge two scans' files.
+    prefix = f"{date}_{location}_"
+    runs = [int(n[len(prefix):]) for n in collect_scan_names()
+            if n.startswith(prefix) and re.fullmatch(r"[0-9]+", n[len(prefix):])]
+    run = max(runs, default=0) + 1
+    if run > 99:      # NAME_RE wants exactly 2 digits: run 100 would be a scan we can't serve
+        raise HTTPException(409, f"99 scans déjà pour {date} / {location} : change le lieu")
+    return f"{prefix}{run:02d}"
 
 def voxel_indices(xyz: np.ndarray, voxel: float) -> np.ndarray:
     """Return indices of one representative point per occupied voxel."""
@@ -269,6 +276,10 @@ class State:
     def __init__(self):
         self.lock = threading.Lock()
         self.running = False
+        # True from the moment a /scan/start claims the device until it is running (or its
+        # failed launch is fully cleaned up). Guards against a second start interleaving
+        # with the warm-up sleeps, now that those no longer block the event loop.
+        self.starting = False
         self.scan = None
         self.started_at = None
         self.procs: dict[str, subprocess.Popen] = {}
@@ -607,6 +618,21 @@ def status():
             "clock_offset_s":round(_clock["offset"], 1),
             "data_root":str(DATA_ROOT),"version":app.version}
 
+@app.post("/clock")
+async def set_clock(request: Request):
+    """Sync the wall-clock offset to the phone: body {client_time_ms}. The app calls this as
+    soon as it connects (and again whenever /status reports offset 0, i.e. after a backend
+    restart), so timestamps are right before the first scan. /scan/start still carries the
+    same field. Only the in-memory offset changes; the system clock is never touched."""
+    try:
+        body = (await request.json()) or {}
+    except Exception:
+        body = {}
+    if not isinstance(body, dict) or not set_clock_from_client(body.get("client_time_ms")):
+        raise HTTPException(400, "client_time_ms invalide")
+    return {"ok": True, "time": wall_now().isoformat(timespec="seconds"),
+            "clock_offset_s": round(_clock["offset"], 1)}
+
 @app.get("/scans")
 def list_scans():
     out = []
@@ -797,30 +823,77 @@ def preview_format():
     }
 
 # ====================== ORCHESTRATION (Phase 2) ======================
+DRIVER_WARMUP_S = 3.0   # let the Livox driver come up before SLAM subscribes
+SLAM_WARMUP_S   = 2.0   # let FAST-LIO init before the bag starts
+BAG_WARMUP_S    = 1.0   # only to catch a recorder that dies at once (e.g. output dir exists)
+
+async def _launch(name: str, cmd: list[str], warmup_s: float):
+    """Spawn a stage, wait for it to settle WITHOUT blocking the event loop (the preview
+    broadcaster, /status polls and the WebSocket keep running), then make sure it is still
+    alive: a `ros2 launch` that exits during warm-up (missing package, bad arg) would
+    otherwise leave a "running" scan that records nothing."""
+    spawn(name, cmd)
+    await asyncio.sleep(warmup_s)
+    rc = S.procs[name].poll()
+    if rc is not None:
+        raise RuntimeError(f"« {name} » s'est arrêté au démarrage (code {rc})")
+
+def _abort_start():
+    """Undo a failed start: stop whatever was spawned, newest first. Runs in a thread
+    (stop_proc waits up to 8 s per process) and releases the start claim only once the
+    processes are gone, so a retry can't launch a second driver next to a dying one."""
+    try:
+        for p in ("bag", "slam", "driver"):
+            stop_proc(p, signal.SIGINT)
+    finally:
+        with S.lock:
+            S.starting = False
+
 @app.post("/scan/start")
 async def scan_start(request: Request):
-    with S.lock:
-        if S.running: raise HTTPException(409, "a scan is already running")
-    location = client_date = None
     try:
         body = (await request.json()) or {}
-        location, client_date = body.get("location"), body.get("client_date")
-        set_clock_from_client(body.get("client_time_ms"))
     except Exception:
-        pass
-    for d in (BAGS, MAPS, CONFIGS, NOTES, TRAJ, HEALTH): d.mkdir(parents=True, exist_ok=True)
-    name = make_scan_name(location, client_date); SCAN_STATE.write_text(name)
+        body = {}
+    if not isinstance(body, dict):
+        body = {}
 
-    spawn("driver", LIDAR_LAUNCH); time.sleep(3.0)         # let the driver come up
-    slam_cmd = list(SLAM_LAUNCH_BASE) #+ [f"map_file_path:={MAPS}/{name}.pcd"]
-    if SLAM_RVIZ_ARG: slam_cmd.append(SLAM_RVIZ_ARG)
-    spawn("slam", slam_cmd); time.sleep(2.0)               # let SLAM init
-    spawn("bag", ["ros2","bag","record",TOPIC_LIDAR,TOPIC_IMU,"-o",str(BAGS / name)])
-
+    # Check-and-claim with no await in between, so two starts can't both get past it.
     with S.lock:
-        S.running, S.scan, S.started_at = True, name, time.time()
-        S.trajectory, S.traj_last = [], None
-        started_at = S.started_at
+        if S.running:  raise HTTPException(409, "a scan is already running")
+        if S.starting: raise HTTPException(409, "a scan is already starting")
+        S.starting = True
+
+    launched = False
+    try:
+        set_clock_from_client(body.get("client_time_ms"))
+        for d in (BAGS, MAPS, CONFIGS, NOTES, TRAJ, HEALTH): d.mkdir(parents=True, exist_ok=True)
+        name = make_scan_name(body.get("location"), body.get("client_date"))
+        SCAN_STATE.write_text(name)
+
+        await _launch("driver", LIDAR_LAUNCH, DRIVER_WARMUP_S)
+        slam_cmd = list(SLAM_LAUNCH_BASE) #+ [f"map_file_path:={MAPS}/{name}.pcd"]
+        if SLAM_RVIZ_ARG: slam_cmd.append(SLAM_RVIZ_ARG)
+        await _launch("slam", slam_cmd, SLAM_WARMUP_S)
+        await _launch("bag", ["ros2","bag","record",TOPIC_LIDAR,TOPIC_IMU,"-o",str(BAGS / name)],
+                      BAG_WARMUP_S)
+
+        with S.lock:
+            S.running, S.starting = True, False
+            S.scan, S.started_at = name, time.time()
+            S.trajectory, S.traj_last = [], None
+            started_at = S.started_at
+        launched = True
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, f"échec du démarrage : {e}")
+    finally:
+        # Also covers cancellation. Cleanup runs off the event loop; S.starting stays
+        # True until it finishes.
+        if not launched:
+            threading.Thread(target=_abort_start, daemon=True).start()
+
     H.open_log(name, started_at)
     return {"scan":name,"running":True,"started_at":iso(started_at)}
 
@@ -880,7 +953,7 @@ def scan_stop():
 def scan_status():
     now = time.time()
     with S.lock:
-        return {"running":S.running,"scan":S.scan,
+        return {"running":S.running,"starting":S.starting,"scan":S.scan,
                 "started_at":iso(S.started_at) if S.started_at else None,
                 "elapsed_s":round(now - S.started_at,1) if S.started_at else 0,
                 "odom_ok":(now - S.last_odom_t) < 2.0,
@@ -905,7 +978,7 @@ def system_health():
 @app.post("/system/shutdown")
 def system_shutdown():
     with S.lock:
-        if S.running:
+        if S.running or S.starting:
             raise HTTPException(409, "stop the scan before shutting down")
     subprocess.Popen(["sudo", "/usr/sbin/shutdown", "-h", "now"])
     return {"ok": True, "message": "shutting down"}

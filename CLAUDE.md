@@ -9,14 +9,18 @@ A Jetson on the device runs the SLAM and stores each scan's artifacts; the phone
 to it over WiFi (the **Jetson runs its own access point**, NetworkManager hotspot, and the
 phone joins it — this used to be the other way round) and is the device's only screen.
 Consequence: the Jetson has no internet, hence **no NTP — its clock drifts** (it was ~9 days
-behind on 2026-10-29). Fix: `POST /scan/start` carries the phone's `client_time_ms` + local
-`client_date`; the backend names the scan with `client_date` and keeps
+behind on 2026-10-29). Fix: the phone hands the backend its time and the backend keeps
 `offset = client − time.time()`, applied by `iso()` / `wall_now()` to every user-facing
 timestamp (`started_at`, health header, notes `_updated`, `/status` time; exposed as
-`clock_offset_s`). Durations keep the raw clock. The system clock is deliberately **not** set
+`clock_offset_s`). The phone sends it **on connect** via `POST /clock {client_time_ms}`
+(`ClockSync.kt`, called from both ViewModels' `/status` polls: syncs when `/status` reports
+offset 0 — never synced since the backend started — and re-syncs every 10 min; attempts are
+rate-limited to one per 30 s, and a backend without `clock_offset_s` is skipped). `POST /scan/start`
+still carries `client_time_ms` + local `client_date` too; the scan is named with `client_date`.
+Durations keep the raw clock. The system clock is deliberately **not** set
 (would need sudo, and a jump under running ROS nodes is risky), so bag stamps / file mtimes
 stay on the Jetson clock. The offset lives in memory: after a backend restart it's 0 until
-the next scan start.
+the phone's next `/status` poll re-syncs it.
 **Backend deploys:** `UnderScannerAPI/deploy-backend.ps1` (deploys only the committed HEAD
 blob; refuses if the Jetson's file isn't found in git history = edited on the Jetson). The app browses scans, downloads point clouds, views config, edits notes, and
 visualizes `.pcd` files in a custom 3D OpenGL viewer.
@@ -88,11 +92,24 @@ the address is fixed). The base URL stays editable in the app's Settings; defaul
 | POST | `/scans/{name}/rename` | Rename; body `{date, location, run}` (each optional) | `{ok, name}`; **409** running / name taken, **400** invalid, **404** unknown |
 | GET | `/scans/{name}/health` | Per-scan health log | JSONL body; **404** if none |
 | GET | `/system/health` | Live Jetson telemetry | latest cached sample + `static` |
-| POST | `/scan/start` | Start a scan; body `{location, client_time_ms, client_date}` | `{scan, running, started_at}`; **409** if running |
+| POST | `/clock` | Sync wall-clock offset; body `{client_time_ms}` | `{ok, time, clock_offset_s}`; **400** if implausible |
+| POST | `/scan/start` | Start a scan; body `{location, client_time_ms, client_date}` | `{scan, running, started_at}`; **409** if running/starting or 99 runs taken; **500** + `detail` if a stage dies during warm-up |
 | POST | `/scan/stop` | Stop + save | `{scan, running:false, pcd, bag}`; **409** if none |
-| GET | `/scan/status` | Poll scan state | `{running, scan, started_at, elapsed_s, odom_ok, cloud_ok}` |
+| GET | `/scan/status` | Poll scan state | `{running, starting, scan, started_at, elapsed_s, odom_ok, cloud_ok}` |
 | WS | `/ws/preview` | Live preview stream | binary cloud frames + JSON pose / `hello`; client → `client_stats` |
-| POST | `/system/shutdown` | Power the Jetson off | `{ok}`; **409** if a scan is running |
+| POST | `/system/shutdown` | Power the Jetson off | `{ok}`; **409** if a scan is running or starting |
+
+**Scan start (`scan_start`)** is `async` and its warm-ups (driver 3 s, SLAM 2 s, bag 1 s) are
+`await asyncio.sleep`, so the event loop — preview broadcaster, WebSocket, `/status` polls —
+keeps running during the ~6 s start. Concurrency is guarded by `S.starting`, claimed in the same
+lock block as the `S.running` check (no `await` between them). After each warm-up `_launch`
+checks the process is still alive (`poll()`); any failure raises, and `_abort_start` stops
+whatever was spawned **in a thread** and only then clears `S.starting`, so a retry can't start a
+second driver next to a dying one. The app surfaces the 500's `detail` text.
+**Run numbers** (`make_scan_name`): next = max run for that `date_location` across *every*
+artifact kind (`collect_scan_names()`), not only bags — a scan whose bag dir was deleted still
+owns its pcd/notes/health. Past run 99 it refuses (409): `NAME_RE` wants exactly 2 digits, so
+run 100 would be a scan the API could create but never serve.
 
 **System health (`HealthMonitor` in `app.py`):** the backend samples Jetson load/thermal/power
 at 1 Hz from unprivileged sysfs/procfs and appends a line to `health/{scan}.jsonl` every 5 s
@@ -158,8 +175,11 @@ drawn as a yellow polyline (`Trajectory.kt` + `MyGLRenderer.drawTrajectory`, `GL
 
 - **MainMenuScreen.kt** — big-button menu: Scan Library and Lidar Control Room.
 
-- **ScanModels.kt** — `ScanInfo`, `ScanArtifact`, `StatusInfo`, and the `ConnectionState`
-  sealed type (Connecting / Connected / Offline).
+- **ScanModels.kt** — `ScanInfo`, `ScanArtifact`, `StatusInfo` (incl. `clockOffsetS`), and the
+  `ConnectionState` sealed type (Connecting / Connected / Offline).
+
+- **ClockSync.kt** — process-wide `object` that pushes the phone's time to `POST /clock` (see
+  the clock note at the top).
 
 - **ScanApiClient.kt** — OkHttp wrapper for the contract above. `downloadPcd()` streams to
   disk with progress, honors coroutine cancellation, and deletes partial files on failure.
@@ -261,8 +281,9 @@ drawn as a yellow polyline (`Trajectory.kt` + `MyGLRenderer.drawTrajectory`, `GL
   stops the scan implicitly.
 - **ScanControlScreens.kt** — `ControlRoomScreen` (New Scan + sticky location, resume-running
   banner; secondary **SSH** and destructive **Power OFF** actions) and `ActiveScanScreen`
-  - **Starting a scan blocks for 5+ s server-side** (`app.py` sleeps 3 s after spawning the Livox
-    driver and 2 s after SLAM, so each is up before the bag recorder starts). The Control Room
+  - **Starting a scan takes ~6 s server-side** (`app.py` waits 3 s after spawning the Livox
+    driver, 2 s after SLAM and 1 s after the bag recorder, checking each is still alive; the
+    waits are non-blocking, so polls keep answering meanwhile). The Control Room
     therefore shows a `StartingScanCard` with stage text timed to that real sequence, and the
     New Scan button becomes a disabled spinner — the VM's `phase == Starting` guard already
     blocked a double `POST /scan/start`, but the button used to still look tappable.
