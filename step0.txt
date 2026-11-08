@@ -1,0 +1,263 @@
+
+=================== fast_lio package ===================
+prefix: /home/orin4slam/ws_fastlio/install/fast_lio
+commit 2fffc570a25d0df172720bac034fbdb6a13d2162 Mon Nov 17 13:58:05 2025 +0800 fix: #65 Fix typo in add_action for config file
+origin	https://github.com/Ericsii/FAST_LIO_ROS2.git (fetch)
+origin	https://github.com/Ericsii/FAST_LIO_ROS2.git (push)
+ M config/mid360.yaml
+
+=================== launch args (--show-args) ===================
+Arguments (pass arguments as '<name>:=<value>'):
+
+    'use_sim_time':
+        Use simulation (Gazebo) clock if true
+        (default: 'false')
+
+    'config_path':
+        Yaml config file path
+        (default: '/home/orin4slam/ws_fastlio/install/fast_lio/share/fast_lio/config')
+
+    'config_file':
+        Config file
+        (default: 'mid360.yaml')
+
+    'rviz':
+        Use RViz to monitor results
+        (default: 'true')
+
+    'rviz_cfg':
+        RViz config file path
+        (default: '/home/orin4slam/ws_fastlio/install/fast_lio/share/fast_lio/rviz/fastlio.rviz')
+
+=================== launch file ===================
+import os.path
+
+from ament_index_python.packages import get_package_share_directory
+
+from launch import LaunchDescription
+from launch.actions import DeclareLaunchArgument
+from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
+from launch.conditions import IfCondition
+
+from launch_ros.actions import Node
+
+
+def generate_launch_description():
+    package_path = get_package_share_directory('fast_lio')
+    default_config_path = os.path.join(package_path, 'config')
+    default_rviz_config_path = os.path.join(
+        package_path, 'rviz', 'fastlio.rviz')
+
+    use_sim_time = LaunchConfiguration('use_sim_time')
+    config_path = LaunchConfiguration('config_path')
+    config_file = LaunchConfiguration('config_file')
+    rviz_use = LaunchConfiguration('rviz')
+    rviz_cfg = LaunchConfiguration('rviz_cfg')
+
+    declare_use_sim_time_cmd = DeclareLaunchArgument(
+        'use_sim_time', default_value='false',
+        description='Use simulation (Gazebo) clock if true'
+    )
+    declare_config_path_cmd = DeclareLaunchArgument(
+        'config_path', default_value=default_config_path,
+        description='Yaml config file path'
+    )
+    declare_config_file_cmd = DeclareLaunchArgument(
+        'config_file', default_value='mid360.yaml',
+        description='Config file'
+    )
+    declare_rviz_cmd = DeclareLaunchArgument(
+        'rviz', default_value='true',
+        description='Use RViz to monitor results'
+    )
+    declare_rviz_config_path_cmd = DeclareLaunchArgument(
+        'rviz_cfg', default_value=default_rviz_config_path,
+        description='RViz config file path'
+    )
+
+    fast_lio_node = Node(
+        package='fast_lio',
+        executable='fastlio_mapping',
+        parameters=[PathJoinSubstitution([config_path, config_file]),
+                    {'use_sim_time': use_sim_time}],
+        output='screen'
+    )
+    rviz_node = Node(
+        package='rviz2',
+        executable='rviz2',
+        arguments=['-d', rviz_cfg],
+        condition=IfCondition(rviz_use)
+    )
+
+    ld = LaunchDescription()
+    ld.add_action(declare_use_sim_time_cmd)
+    ld.add_action(declare_config_path_cmd)
+    ld.add_action(declare_config_file_cmd)
+    ld.add_action(declare_rviz_cmd)
+    ld.add_action(declare_rviz_config_path_cmd)
+
+    ld.add_action(fast_lio_node)
+    ld.add_action(rviz_node)
+
+    return ld
+
+=================== symlink-install? (config + launch in share/) ===================
+/home/orin4slam/ws_fastlio/install/fast_lio/share/fast_lio/config/:
+total 28
+drwxrwxr-x  2 orin4slam orin4slam 4096 Jun 29 00:31 .
+drwxrwxr-x 10 orin4slam orin4slam 4096 Jun 29 16:27 ..
+lrwxrwxrwx  1 orin4slam orin4slam   61 Jun 29 00:31 avia.yaml -> /home/orin4slam/ws_fastlio/src/FAST_LIO_ROS2/config/avia.yaml
+lrwxrwxrwx  1 orin4slam orin4slam   64 Jun 29 00:31 horizon.yaml -> /home/orin4slam/ws_fastlio/src/FAST_LIO_ROS2/config/horizon.yaml
+lrwxrwxrwx  1 orin4slam orin4slam   63 Jun 29 00:31 mid360.yaml -> /home/orin4slam/ws_fastlio/src/FAST_LIO_ROS2/config/mid360.yaml
+lrwxrwxrwx  1 orin4slam orin4slam   65 Jun 29 00:31 ouster64.yaml -> /home/orin4slam/ws_fastlio/src/FAST_LIO_ROS2/config/ouster64.yaml
+lrwxrwxrwx  1 orin4slam orin4slam   65 Jun 29 00:31 velodyne.yaml -> /home/orin4slam/ws_fastlio/src/FAST_LIO_ROS2/config/velodyne.yaml
+
+/home/orin4slam/ws_fastlio/install/fast_lio/share/fast_lio/launch/:
+total 20
+drwxrwxr-x  3 orin4slam orin4slam 4096 Jun 29 00:48 .
+drwxrwxr-x 10 orin4slam orin4slam 4096 Jun 29 16:27 ..
+lrwxrwxrwx  1 orin4slam orin4slam   76 Jun 29 00:31 gdb_debug_example.launch -> /home/orin4slam/ws_fastlio/src/FAST_LIO_ROS2/launch/gdb_debug_example.launch
+lrwxrwxrwx  1 orin4slam orin4slam   69 Jun 29 00:31 mapping.launch.py -> /home/orin4slam/ws_fastlio/src/FAST_LIO_ROS2/launch/mapping.launch.py
+drwxrwxr-x  2 orin4slam orin4slam 4096 Jun 29 00:48 __pycache__
+ament_cmake_core
+ament_cmake_environment_hooks
+ament_cmake_export_dependencies
+ament_cmake_export_include_directories
+ament_cmake_export_libraries
+
+=================== src vs installed mid360.yaml ===================
+/home/orin4slam/ws_fastlio/src/FAST_LIO_ROS2/config/mid360.yaml  sha256=366e4e4d3e904bf5
+/home/orin4slam/ws_fastlio/src/FAST_LIO_ROS2/config/mid360.yaml  sha256=366e4e4d3e904bf5
+IDENTICAL
+
+=================== installed mid360.yaml (what FAST-LIO actually reads today) ===================
+     1	/**:
+     2	    ros__parameters:
+     3	        feature_extract_enable: false
+     4	        point_filter_num: 3
+     5	        max_iteration: 3
+     6	        filter_size_surf: 0.5
+     7	        filter_size_map: 0.5
+     8	        cube_side_length: 1000.0
+     9	        runtime_pos_log_enable: false
+    10	        map_file_path: "/data/underscanner/.lastscan.pcd"
+    11	
+    12	        common:
+    13	            lid_topic:  "/livox/lidar"
+    14	            imu_topic:  "/livox/imu"
+    15	            time_sync_en: false         # ONLY turn on when external time synchronization is really not possible
+    16	            time_offset_lidar_to_imu: 0.0 # Time offset between lidar and IMU calibrated by other algorithms, e.g. LI-Init (can be found in README).
+    17	                                        # This param will take effect no matter what time_sync_en is. So if the time offset is not known exactly, please set as 0.0
+    18	
+    19	        preprocess:
+    20	            lidar_type: 1                # 1 for Livox serials LiDAR, 2 for Velodyne LiDAR, 3 for ouster LiDAR, 4 for any other pointcloud input
+    21	            scan_line:  4
+    22	            blind: 0.5
+    23	            timestamp_unit: 3
+    24	            scan_rate: 10
+    25	
+    26	        mapping:
+    27	            acc_cov: 0.1
+    28	            gyr_cov: 0.1
+    29	            b_acc_cov: 0.0001
+    30	            b_gyr_cov: 0.0001
+    31	            fov_degree:    360.0
+    32	            det_range:     100.0
+    33	            extrinsic_est_en:  true      # true: enable the online estimation of IMU-LiDAR extrinsic
+    34	            extrinsic_T: [ -0.011, -0.02329, 0.04412 ]
+    35	            extrinsic_R: [ 1., 0., 0.,
+    36	                            0., 1., 0.,
+    37	                            0., 0., 1.]
+    38	
+    39	        publish:
+    40	            path_en: true                # true: publish Path
+    41	            effect_map_en: false         # true: publish Effects
+    42	            map_en: true                 # true: publish Map cloud
+    43	            scan_publish_en:  true       # false: close all the point cloud output
+    44	            dense_publish_en: false      # false: low down the points number in a global-frame point clouds scan.
+    45	            scan_bodyframe_pub_en: true  # true: output the point cloud scans in IMU-body-frame
+    46	
+    47	        pcd_save:
+    48	            pcd_save_en: true
+    49	            interval: -1                 # how many LiDAR frames saved in each pcd file; 
+    50	                                        # -1 : all frames will be saved in ONE pcd file, may lead to memory crash when having too much frames.
+
+=================== map_file_path / map_save / pcd in source ===================
+/home/orin4slam/ws_fastlio/src/FAST_LIO_ROS2/src/laserMapping.cpp:76:bool   runtime_pos_log = false, pcd_save_en = false, time_sync_en = false, extrinsic_est_en = true, path_en = true;
+/home/orin4slam/ws_fastlio/src/FAST_LIO_ROS2/src/laserMapping.cpp:88:string map_file_path, lid_topic, imu_topic;
+/home/orin4slam/ws_fastlio/src/FAST_LIO_ROS2/src/laserMapping.cpp:96:int    iterCount = 0, feats_down_size = 0, NUM_MAX_ITERATIONS = 0, laserCloudValidNum = 0, pcd_save_interval = -1, pcd_index = 0;
+/home/orin4slam/ws_fastlio/src/FAST_LIO_ROS2/src/laserMapping.cpp:517:    if (pcd_save_en)
+/home/orin4slam/ws_fastlio/src/FAST_LIO_ROS2/src/laserMapping.cpp:532:        if (pcl_wait_save->size() > 0 && pcd_save_interval > 0  && scan_wait_num >= pcd_save_interval)
+/home/orin4slam/ws_fastlio/src/FAST_LIO_ROS2/src/laserMapping.cpp:612:    pcd_writer.writeBinary(map_file_path, *pcl_wait_pub);
+/home/orin4slam/ws_fastlio/src/FAST_LIO_ROS2/src/laserMapping.cpp:808:        this->declare_parameter<string>("map_file_path", "");
+/home/orin4slam/ws_fastlio/src/FAST_LIO_ROS2/src/laserMapping.cpp:809:        this->declare_parameter<string>("common.lid_topic", "/livox/lidar");
+/home/orin4slam/ws_fastlio/src/FAST_LIO_ROS2/src/laserMapping.cpp:813:        this->declare_parameter<double>("filter_size_corner", 0.5);
+/home/orin4slam/ws_fastlio/src/FAST_LIO_ROS2/src/laserMapping.cpp:814:        this->declare_parameter<double>("filter_size_surf", 0.5);
+/home/orin4slam/ws_fastlio/src/FAST_LIO_ROS2/src/laserMapping.cpp:815:        this->declare_parameter<double>("filter_size_map", 0.5);
+/home/orin4slam/ws_fastlio/src/FAST_LIO_ROS2/src/laserMapping.cpp:832:        this->declare_parameter<bool>("pcd_save.pcd_save_en", false);
+/home/orin4slam/ws_fastlio/src/FAST_LIO_ROS2/src/laserMapping.cpp:833:        this->declare_parameter<int>("pcd_save.interval", -1);
+/home/orin4slam/ws_fastlio/src/FAST_LIO_ROS2/src/laserMapping.cpp:844:        this->get_parameter_or<string>("map_file_path", map_file_path, "");
+/home/orin4slam/ws_fastlio/src/FAST_LIO_ROS2/src/laserMapping.cpp:845:        this->get_parameter_or<string>("common.lid_topic", lid_topic, "/livox/lidar");
+/home/orin4slam/ws_fastlio/src/FAST_LIO_ROS2/src/laserMapping.cpp:868:        this->get_parameter_or<bool>("pcd_save.pcd_save_en", pcd_save_en, false);
+/home/orin4slam/ws_fastlio/src/FAST_LIO_ROS2/src/laserMapping.cpp:869:        this->get_parameter_or<int>("pcd_save.interval", pcd_save_interval, -1);
+/home/orin4slam/ws_fastlio/src/FAST_LIO_ROS2/src/laserMapping.cpp:930:        pubLaserCloudFull_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("/cloud_registered", 20);
+/home/orin4slam/ws_fastlio/src/FAST_LIO_ROS2/src/laserMapping.cpp:931:        pubLaserCloudFull_body_ = this->create_publisher<sensor_msgs::msg::PointCloud2>("/cloud_registered_body", 20);
+/home/orin4slam/ws_fastlio/src/FAST_LIO_ROS2/src/laserMapping.cpp:934:        pubOdomAftMapped_ = this->create_publisher<nav_msgs::msg::Odometry>("/Odometry", 20);
+/home/orin4slam/ws_fastlio/src/FAST_LIO_ROS2/src/laserMapping.cpp:945:        map_save_srv_ = this->create_service<std_srvs::srv::Trigger>("map_save", std::bind(&LaserMappingNode::map_save_callback, this, std::placeholders::_1, std::placeholders::_2));
+/home/orin4slam/ws_fastlio/src/FAST_LIO_ROS2/src/laserMapping.cpp:1115:    void map_save_callback(std_srvs::srv::Trigger::Request::ConstSharedPtr req, std_srvs::srv::Trigger::Response::SharedPtr res)
+/home/orin4slam/ws_fastlio/src/FAST_LIO_ROS2/src/laserMapping.cpp:1117:        RCLCPP_INFO(this->get_logger(), "Saving map to %s...", map_file_path.c_str());
+/home/orin4slam/ws_fastlio/src/FAST_LIO_ROS2/src/laserMapping.cpp:1118:        if (pcd_save_en)
+/home/orin4slam/ws_fastlio/src/FAST_LIO_ROS2/src/laserMapping.cpp:1145:    rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr map_save_srv_;
+/home/orin4slam/ws_fastlio/src/FAST_LIO_ROS2/src/laserMapping.cpp:1170:    if (pcl_wait_save->size() > 0 && pcd_save_en)
+
+=================== backend python env ===================
+total 136
+drwxrwxr-x  5 orin4slam orin4slam  4096 Oct 20 22:41 .
+drwxr-x--- 22 orin4slam orin4slam  4096 Oct 20 20:33 ..
+-rw-rw-r--  1 orin4slam orin4slam 47961 Oct 20 22:41 app.py
+-rw-------  1 orin4slam orin4slam 44295 Oct 20 22:41 app.py.bak
+-rw-------  1 orin4slam orin4slam 20470 Jul 20 18:43 app.py.bak-before-accents
+drwxrwxr-x  7 orin4slam orin4slam  4096 Jul 20 18:39 .git
+drwxrwxr-x  2 orin4slam orin4slam  4096 Oct 20 22:08 __pycache__
+-rw-rw-r--  1 orin4slam orin4slam  3141 Jul 20 19:01 ReadMe.md
+drwxrwxr-x  5 orin4slam orin4slam  4096 Jun 29 16:47 venv
+3.10.12 pyyaml 5.4.1 /usr/lib/python3/dist-packages/yaml/__init__.py
+Traceback (most recent call last):
+
+=================== service unit ===================
+# /etc/systemd/system/underscanner.service
+[Unit]
+Description=Underscanner backend
+After=network-online.target
+
+[Service]
+Type=simple
+User=orin4slam
+# systemd does NOT read .bashrc — source ROS explicitly:
+ExecStart=/bin/bash -lc 'source /opt/ros/humble/setup.bash && \
+  source /home/orin4slam/ws_livox/install/setup.bash && \
+  source /home/orin4slam/ws_fastlio/install/setup.bash && \
+  source /home/orin4slam/underscanner-api/venv/bin/activate && \
+  python3 /home/orin4slam/underscanner-api/app.py'
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
+
+=================== data root ===================
+total 36
+drwxr-xr-x  8 orin4slam orin4slam 4096 Oct 20 22:37 .
+drwx------  4 orin4slam orin4slam 4096 Jun 29 01:34 ..
+drwxr-xr-x 43 orin4slam orin4slam 4096 Oct 20 22:32 bags
+drwxr-xr-x  2 orin4slam orin4slam 4096 Oct 20 22:37 configs
+-rw-rw-r--  1 orin4slam orin4slam   27 Oct 20 22:32 .current_scan
+drwxr-xr-x  2 orin4slam orin4slam 4096 Oct 20 22:32 health
+drwxr-xr-x  2 orin4slam orin4slam 4096 Oct 20 22:37 maps
+drwxr-xr-x  2 orin4slam orin4slam 4096 Oct 20  2026 notes
+drwxr-xr-x  2 orin4slam orin4slam 4096 Oct 20 22:37 trajectories
+2026-10-29_Grotte-Aldene_01.yaml
+2026-10-29_Grotte-Aldene_02.yaml
+2026-10-29_Grotte-Aldene_03.yaml
+2026-10-29_Grotte-Aldene_04.yaml
+2026-10-29_Grotte-Aldene_05.yaml
+/dev/nvme0n1p1  218G   38G  170G  19% /

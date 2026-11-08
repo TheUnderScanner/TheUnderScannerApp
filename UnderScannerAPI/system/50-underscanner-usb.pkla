@@ -1,0 +1,13 @@
+# polkit 0.105 (Ubuntu 22.04 / JetPack 6) local authority file.
+# Installed to /etc/polkit-1/localauthority/50-local.d/50-underscanner-usb.pkla
+# (see UnderScannerAPI/ReadMe.md, "Clé USB").
+#
+# Lets the backend (systemd service, user orin4slam, no graphical session) mount,
+# unmount and power off REMOVABLE drives through udisks2, without sudo.
+# Deliberately NOT granted: filesystem-mount-system (internal / system disks).
+[UnderScanner: USB sticks for the backend]
+Identity=unix-user:orin4slam
+Action=org.freedesktop.udisks2.filesystem-mount;org.freedesktop.udisks2.filesystem-mount-other-seat;org.freedesktop.udisks2.filesystem-unmount-others;org.freedesktop.udisks2.power-off-drive;org.freedesktop.udisks2.power-off-drive-other-seat;org.freedesktop.udisks2.eject-media;org.freedesktop.udisks2.eject-media-other-seat
+ResultAny=yes
+ResultInactive=yes
+ResultActive=yes

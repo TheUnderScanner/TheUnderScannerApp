@@ -1,0 +1,609 @@
+
+=================== user / groups ===================
+uid=1000(orin4slam) gid=1000(orin4slam) groups=1000(orin4slam),4(adm),24(cdrom),27(sudo),29(audio),30(dip),44(video),46(plugdev),104(render),116(i2c),120(lpadmin),135(gdm),136(sambashare),996(weston-launch),999(gpio)
+
+=================== udisks2 ===================
+/usr/bin/udisksctl
+active
+MODEL                     REVISION  SERIAL               DEVICE
+--------------------------------------------------------------------------
+Force MP510               ECFM12.2  192782050001276972E7 nvme0n1 
+SanDisk Cruzer Force      1.27      4C530011340317100334 sda     
+
+=================== block devices (lsblk, bytes) ===================
+NAME         PATH            TYPE         SIZE FSTYPE   FSVER LABEL      MODEL        VENDOR   TRAN   RM HOTPLUG MOUNTPOINT                        FSAVAIL
+loop0        /dev/loop0      loop         4096 squashfs 4.0                                            0       0 /snap/bare/5                            0
+loop1        /dev/loop1      loop     64864256 squashfs 4.0                                            0       0 /snap/core24/1644                       0
+loop2        /dev/loop2      loop    579809280 squashfs 4.0                                            0       0 /snap/gnome-46-2404/154                 0
+loop3        /dev/loop3      loop     96141312 squashfs 4.0                                            0       0 /snap/gtk-common-themes/1535            0
+loop4        /dev/loop4      loop    183046144 squashfs 4.0                                            0       0 /snap/mesa-2404/1166                    0
+loop5        /dev/loop5      loop    164339712 squashfs 4.0                                            0       0 /snap/signal-desktop/920                0
+loop6        /dev/loop6      loop    167677952 squashfs 4.0                                            0       0 /snap/signal-desktop/960                0
+loop7        /dev/loop7      loop     44703744 squashfs 4.0                                            0       0 /snap/snapd/26869                       0
+loop8        /dev/loop8      loop     40513536 squashfs 4.0                                            0       0 /snap/snapd/28255                       0
+loop9        /dev/loop9      loop     16777216 vfat     FAT16 L4T-README                               0       0                              
+sda          /dev/sda        disk  31260704768                           Cruzer Force SanDisk  usb     1       1                              
+└─sda1       /dev/sda1       part  31259099136 vfat     FAT32 ESD-USB                                  1       1                              
+zram0        /dev/zram0      disk    664743936                                                         0       0 [SWAP]                       
+zram1        /dev/zram1      disk    664743936                                                         0       0 [SWAP]                       
+zram2        /dev/zram2      disk    664743936                                                         0       0 [SWAP]                       
+zram3        /dev/zram3      disk    664743936                                                         0       0 [SWAP]                       
+zram4        /dev/zram4      disk    664743936                                                         0       0 [SWAP]                       
+zram5        /dev/zram5      disk    664743936                                                         0       0 [SWAP]                       
+nvme0n1      /dev/nvme0n1    disk 240057409536                           Force MP510           nvme    0       0                              
+├─nvme0n1p1  /dev/nvme0n1p1  part 238495764480 ext4     1.0                                    nvme    0       0 /                            181748334592
+├─nvme0n1p2  /dev/nvme0n1p2  part    134217728                                                 nvme    0       0                              
+├─nvme0n1p3  /dev/nvme0n1p3  part       786432                                                 nvme    0       0                              
+├─nvme0n1p4  /dev/nvme0n1p4  part     33161216                                                 nvme    0       0                              
+├─nvme0n1p5  /dev/nvme0n1p5  part    134217728                                                 nvme    0       0                              
+├─nvme0n1p6  /dev/nvme0n1p6  part       786432                                                 nvme    0       0                              
+├─nvme0n1p7  /dev/nvme0n1p7  part     33161216                                                 nvme    0       0                              
+├─nvme0n1p8  /dev/nvme0n1p8  part     83886080                                                 nvme    0       0                              
+├─nvme0n1p9  /dev/nvme0n1p9  part       524288                                                 nvme    0       0                              
+├─nvme0n1p10 /dev/nvme0n1p10 part     67108864 vfat     FAT32                                  nvme    0       0 /boot/efi                        65979904
+├─nvme0n1p11 /dev/nvme0n1p11 part     83886080                                                 nvme    0       0                              
+├─nvme0n1p12 /dev/nvme0n1p12 part       524288                                                 nvme    0       0                              
+├─nvme0n1p13 /dev/nvme0n1p13 part     67108864                                                 nvme    0       0                              
+├─nvme0n1p14 /dev/nvme0n1p14 part    419430400                                                 nvme    0       0                              
+└─nvme0n1p15 /dev/nvme0n1p15 part    502792192                                                 nvme    0       0                              
+
+=================== block devices (lsblk -J, what the backend would parse) ===================
+{
+   "blockdevices": [
+      {
+         "name": "loop0",
+         "path": "/dev/loop0",
+         "type": "loop",
+         "size": 4096,
+         "fstype": "squashfs",
+         "label": null,
+         "model": null,
+         "vendor": null,
+         "tran": null,
+         "rm": false,
+         "hotplug": false,
+         "mountpoint": "/snap/bare/5",
+         "fsavail": "0"
+      },{
+         "name": "loop1",
+         "path": "/dev/loop1",
+         "type": "loop",
+         "size": 64864256,
+         "fstype": "squashfs",
+         "label": null,
+         "model": null,
+         "vendor": null,
+         "tran": null,
+         "rm": false,
+         "hotplug": false,
+         "mountpoint": "/snap/core24/1644",
+         "fsavail": "0"
+      },{
+         "name": "loop2",
+         "path": "/dev/loop2",
+         "type": "loop",
+         "size": 579809280,
+         "fstype": "squashfs",
+         "label": null,
+         "model": null,
+         "vendor": null,
+         "tran": null,
+         "rm": false,
+         "hotplug": false,
+         "mountpoint": "/snap/gnome-46-2404/154",
+         "fsavail": "0"
+      },{
+         "name": "loop3",
+         "path": "/dev/loop3",
+         "type": "loop",
+         "size": 96141312,
+         "fstype": "squashfs",
+         "label": null,
+         "model": null,
+         "vendor": null,
+         "tran": null,
+         "rm": false,
+         "hotplug": false,
+         "mountpoint": "/snap/gtk-common-themes/1535",
+         "fsavail": "0"
+      },{
+         "name": "loop4",
+         "path": "/dev/loop4",
+         "type": "loop",
+         "size": 183046144,
+         "fstype": "squashfs",
+         "label": null,
+         "model": null,
+         "vendor": null,
+         "tran": null,
+         "rm": false,
+         "hotplug": false,
+         "mountpoint": "/snap/mesa-2404/1166",
+         "fsavail": "0"
+      },{
+         "name": "loop5",
+         "path": "/dev/loop5",
+         "type": "loop",
+         "size": 164339712,
+         "fstype": "squashfs",
+         "label": null,
+         "model": null,
+         "vendor": null,
+         "tran": null,
+         "rm": false,
+         "hotplug": false,
+         "mountpoint": "/snap/signal-desktop/920",
+         "fsavail": "0"
+      },{
+         "name": "loop6",
+         "path": "/dev/loop6",
+         "type": "loop",
+         "size": 167677952,
+         "fstype": "squashfs",
+         "label": null,
+         "model": null,
+         "vendor": null,
+         "tran": null,
+         "rm": false,
+         "hotplug": false,
+         "mountpoint": "/snap/signal-desktop/960",
+         "fsavail": "0"
+      },{
+         "name": "loop7",
+         "path": "/dev/loop7",
+         "type": "loop",
+         "size": 44703744,
+         "fstype": "squashfs",
+         "label": null,
+         "model": null,
+         "vendor": null,
+         "tran": null,
+         "rm": false,
+         "hotplug": false,
+         "mountpoint": "/snap/snapd/26869",
+         "fsavail": "0"
+      },{
+         "name": "loop8",
+         "path": "/dev/loop8",
+         "type": "loop",
+         "size": 40513536,
+         "fstype": "squashfs",
+         "label": null,
+         "model": null,
+         "vendor": null,
+         "tran": null,
+         "rm": false,
+         "hotplug": false,
+         "mountpoint": "/snap/snapd/28255",
+         "fsavail": "0"
+      },{
+         "name": "loop9",
+         "path": "/dev/loop9",
+         "type": "loop",
+         "size": 16777216,
+         "fstype": "vfat",
+         "label": "L4T-README",
+         "model": null,
+         "vendor": null,
+         "tran": null,
+         "rm": false,
+         "hotplug": false,
+         "mountpoint": null,
+         "fsavail": null
+      },{
+         "name": "sda",
+         "path": "/dev/sda",
+         "type": "disk",
+         "size": 31260704768,
+         "fstype": null,
+         "label": null,
+         "model": "Cruzer Force",
+         "vendor": "SanDisk ",
+         "tran": "usb",
+         "rm": true,
+         "hotplug": true,
+         "mountpoint": null,
+         "fsavail": null,
+         "children": [
+            {
+               "name": "sda1",
+               "path": "/dev/sda1",
+               "type": "part",
+               "size": 31259099136,
+               "fstype": "vfat",
+               "label": "ESD-USB",
+               "model": null,
+               "vendor": null,
+               "tran": null,
+               "rm": true,
+               "hotplug": true,
+               "mountpoint": null,
+               "fsavail": null
+            }
+         ]
+      },{
+         "name": "zram0",
+         "path": "/dev/zram0",
+         "type": "disk",
+         "size": 664743936,
+         "fstype": null,
+         "label": null,
+         "model": null,
+         "vendor": null,
+         "tran": null,
+         "rm": false,
+         "hotplug": false,
+         "mountpoint": "[SWAP]",
+         "fsavail": null
+      },{
+         "name": "zram1",
+         "path": "/dev/zram1",
+         "type": "disk",
+         "size": 664743936,
+         "fstype": null,
+         "label": null,
+         "model": null,
+         "vendor": null,
+         "tran": null,
+         "rm": false,
+         "hotplug": false,
+         "mountpoint": "[SWAP]",
+         "fsavail": null
+      },{
+         "name": "zram2",
+         "path": "/dev/zram2",
+         "type": "disk",
+         "size": 664743936,
+         "fstype": null,
+         "label": null,
+         "model": null,
+         "vendor": null,
+         "tran": null,
+         "rm": false,
+         "hotplug": false,
+         "mountpoint": "[SWAP]",
+         "fsavail": null
+      },{
+         "name": "zram3",
+         "path": "/dev/zram3",
+         "type": "disk",
+         "size": 664743936,
+         "fstype": null,
+         "label": null,
+         "model": null,
+         "vendor": null,
+         "tran": null,
+         "rm": false,
+         "hotplug": false,
+         "mountpoint": "[SWAP]",
+         "fsavail": null
+      },{
+         "name": "zram4",
+         "path": "/dev/zram4",
+         "type": "disk",
+         "size": 664743936,
+         "fstype": null,
+         "label": null,
+         "model": null,
+         "vendor": null,
+         "tran": null,
+         "rm": false,
+         "hotplug": false,
+         "mountpoint": "[SWAP]",
+         "fsavail": null
+      },{
+         "name": "zram5",
+         "path": "/dev/zram5",
+         "type": "disk",
+         "size": 664743936,
+         "fstype": null,
+         "label": null,
+         "model": null,
+         "vendor": null,
+         "tran": null,
+         "rm": false,
+         "hotplug": false,
+         "mountpoint": "[SWAP]",
+         "fsavail": null
+      },{
+         "name": "nvme0n1",
+         "path": "/dev/nvme0n1",
+         "type": "disk",
+         "size": 240057409536,
+         "fstype": null,
+         "label": null,
+         "model": "Force MP510",
+         "vendor": null,
+         "tran": "nvme",
+         "rm": false,
+         "hotplug": false,
+         "mountpoint": null,
+         "fsavail": null,
+         "children": [
+            {
+               "name": "nvme0n1p1",
+               "path": "/dev/nvme0n1p1",
+               "type": "part",
+               "size": 238495764480,
+               "fstype": "ext4",
+               "label": null,
+               "model": null,
+               "vendor": null,
+               "tran": "nvme",
+               "rm": false,
+               "hotplug": false,
+               "mountpoint": "/",
+               "fsavail": "181748334592"
+            },{
+               "name": "nvme0n1p2",
+               "path": "/dev/nvme0n1p2",
+               "type": "part",
+               "size": 134217728,
+               "fstype": null,
+               "label": null,
+               "model": null,
+               "vendor": null,
+               "tran": "nvme",
+               "rm": false,
+               "hotplug": false,
+               "mountpoint": null,
+               "fsavail": null
+            },{
+               "name": "nvme0n1p3",
+               "path": "/dev/nvme0n1p3",
+               "type": "part",
+               "size": 786432,
+               "fstype": null,
+               "label": null,
+               "model": null,
+               "vendor": null,
+               "tran": "nvme",
+               "rm": false,
+               "hotplug": false,
+               "mountpoint": null,
+               "fsavail": null
+            },{
+               "name": "nvme0n1p4",
+               "path": "/dev/nvme0n1p4",
+               "type": "part",
+               "size": 33161216,
+               "fstype": null,
+               "label": null,
+               "model": null,
+               "vendor": null,
+               "tran": "nvme",
+               "rm": false,
+               "hotplug": false,
+               "mountpoint": null,
+               "fsavail": null
+            },{
+               "name": "nvme0n1p5",
+               "path": "/dev/nvme0n1p5",
+               "type": "part",
+               "size": 134217728,
+               "fstype": null,
+               "label": null,
+               "model": null,
+               "vendor": null,
+               "tran": "nvme",
+               "rm": false,
+               "hotplug": false,
+               "mountpoint": null,
+               "fsavail": null
+            },{
+               "name": "nvme0n1p6",
+               "path": "/dev/nvme0n1p6",
+               "type": "part",
+               "size": 786432,
+               "fstype": null,
+               "label": null,
+               "model": null,
+               "vendor": null,
+               "tran": "nvme",
+               "rm": false,
+               "hotplug": false,
+               "mountpoint": null,
+               "fsavail": null
+            },{
+               "name": "nvme0n1p7",
+               "path": "/dev/nvme0n1p7",
+               "type": "part",
+               "size": 33161216,
+               "fstype": null,
+               "label": null,
+               "model": null,
+               "vendor": null,
+               "tran": "nvme",
+               "rm": false,
+               "hotplug": false,
+               "mountpoint": null,
+               "fsavail": null
+            },{
+               "name": "nvme0n1p8",
+               "path": "/dev/nvme0n1p8",
+               "type": "part",
+               "size": 83886080,
+               "fstype": null,
+               "label": null,
+               "model": null,
+               "vendor": null,
+               "tran": "nvme",
+               "rm": false,
+               "hotplug": false,
+               "mountpoint": null,
+               "fsavail": null
+            },{
+               "name": "nvme0n1p9",
+               "path": "/dev/nvme0n1p9",
+               "type": "part",
+               "size": 524288,
+               "fstype": null,
+               "label": null,
+               "model": null,
+               "vendor": null,
+               "tran": "nvme",
+               "rm": false,
+               "hotplug": false,
+               "mountpoint": null,
+               "fsavail": null
+            },{
+               "name": "nvme0n1p10",
+               "path": "/dev/nvme0n1p10",
+               "type": "part",
+               "size": 67108864,
+               "fstype": "vfat",
+               "label": null,
+               "model": null,
+               "vendor": null,
+               "tran": "nvme",
+               "rm": false,
+               "hotplug": false,
+               "mountpoint": "/boot/efi",
+               "fsavail": "65979904"
+            },{
+               "name": "nvme0n1p11",
+               "path": "/dev/nvme0n1p11",
+               "type": "part",
+               "size": 83886080,
+               "fstype": null,
+               "label": null,
+               "model": null,
+               "vendor": null,
+               "tran": "nvme",
+               "rm": false,
+               "hotplug": false,
+               "mountpoint": null,
+               "fsavail": null
+            },{
+               "name": "nvme0n1p12",
+               "path": "/dev/nvme0n1p12",
+               "type": "part",
+               "size": 524288,
+               "fstype": null,
+               "label": null,
+               "model": null,
+               "vendor": null,
+               "tran": "nvme",
+               "rm": false,
+               "hotplug": false,
+               "mountpoint": null,
+               "fsavail": null
+            },{
+               "name": "nvme0n1p13",
+               "path": "/dev/nvme0n1p13",
+               "type": "part",
+               "size": 67108864,
+               "fstype": null,
+               "label": null,
+               "model": null,
+               "vendor": null,
+               "tran": "nvme",
+               "rm": false,
+               "hotplug": false,
+               "mountpoint": null,
+               "fsavail": null
+            },{
+               "name": "nvme0n1p14",
+               "path": "/dev/nvme0n1p14",
+               "type": "part",
+               "size": 419430400,
+               "fstype": null,
+               "label": null,
+               "model": null,
+               "vendor": null,
+               "tran": "nvme",
+               "rm": false,
+               "hotplug": false,
+               "mountpoint": null,
+               "fsavail": null
+            },{
+               "name": "nvme0n1p15",
+               "path": "/dev/nvme0n1p15",
+               "type": "part",
+               "size": 502792192,
+               "fstype": null,
+               "label": null,
+               "model": null,
+               "vendor": null,
+               "tran": "nvme",
+               "rm": false,
+               "hotplug": false,
+               "mountpoint": null,
+               "fsavail": null
+            }
+         ]
+      }
+   ]
+}
+
+=================== current mounts of USB-ish devices ===================
+(none)
+/media:
+total 12
+drwxr-xr-x   3 root root 4096 Jun 28 19:50 .
+drwxr-xr-x  20 root root 4096 Aug 26  2025 ..
+drwxr-x---+  2 root root 4096 Oct 20  2026 orin4slam
+
+/media/orin4slam:
+total 8
+drwxr-x---+ 2 root root 4096 Oct 20  2026 .
+drwxr-xr-x  3 root root 4096 Jun 28 19:50 ..
+
+/mnt:
+total 12
+drwxr-xr-x  3 root root 4096 Oct 20 21:55 .
+drwxr-xr-x 20 root root 4096 Aug 26  2025 ..
+drwxr-xr-x  2 root root 4096 Oct 21  2026 usb
+
+=================== polkit (0.105 = .pkla files; >= 0.106 = JS rules) ===================
+pkaction version 0.105
+gir1.2-polkit-1.0 0.105-33ubuntu0.1
+libpolkit-agent-1-0:arm64 0.105-33ubuntu0.1
+libpolkit-gobject-1-0:arm64 0.105-33ubuntu0.1
+pkexec 0.105-33ubuntu0.1
+policykit-1 0.105-33ubuntu0.1
+policykit-desktop-privileges 0.21
+polkitd 0.105-33ubuntu0.1
+ls: cannot access '/etc/polkit-1/rules.d': No such file or directory
+ls: cannot access '/etc/polkit-1/localauthority/50-local.d': Permission denied
+ls: cannot access '/var/lib/polkit-1/localauthority/50-local.d': Permission denied
+
+=================== would udisks let THIS (ssh, no active seat) user mount? (pkcheck only asks, mounts nothing) ===================
+org.freedesktop.udisks2.filesystem-mount -> exit 2 (0 = allowed, 1/2 = not authorized / needs auth)
+org.freedesktop.udisks2.filesystem-mount-other-seat -> exit 2 (0 = allowed, 1/2 = not authorized / needs auth)
+org.freedesktop.udisks2.filesystem-unmount-others -> exit 2 (0 = allowed, 1/2 = not authorized / needs auth)
+org.freedesktop.udisks2.power-off-drive -> exit 2 (0 = allowed, 1/2 = not authorized / needs auth)
+org.freedesktop.udisks2.power-off-drive-other-seat -> exit 2 (0 = allowed, 1/2 = not authorized / needs auth)
+SESSION  UID USER      SEAT  TTY
+      2 1000 orin4slam       
+     c1  128 gdm       seat0 tty1
+
+2 sessions listed.
+
+=================== filesystems the kernel can mount ===================
+	ext4
+	vfat
+	exfat
+	ntfs
+	fuseblk
+/usr/sbin/mount.ntfs-3g
+/usr/bin/ntfs-3g
+
+=================== rsync ===================
+rsync  version 3.2.7  protocol version 31
+
+=================== sudo rules for this user (non-interactive; fails harmlessly if a password is needed) ===================
+Matching Defaults entries for orin4slam on ubuntu:
+    env_reset, mail_badpass, secure_path=/usr/local/sbin\:/usr/local/bin\:/usr/sbin\:/usr/bin\:/sbin\:/bin\:/snap/bin, use_pty
+
+User orin4slam may run the following commands on ubuntu:
+    (ALL : ALL) ALL
+    (root) NOPASSWD: /usr/sbin/shutdown, /usr/sbin/poweroff
+
+=================== biggest single files in recent bags (FAT32 = 4 GiB max per file) ===================
+1.18 GiB	/data/underscanner/bags/2026-10-26_Mila-Dehors_01/2026-10-20_Mila-Dehors_01_0.db3
+1.29 GiB	/data/underscanner/bags/2026-10-27_J-M_02/2026-10-20_J-M_02_0.db3
+2.14 GiB	/data/underscanner/bags/2026-10-29_Grotte-Aldene_01/2026-10-29_Grotte-Aldene_01_0.db3
+2.16 GiB	/data/underscanner/bags/2026-10-29_Grotte-Aldene_02/2026-10-29_Grotte-Aldene_02_0.db3
+2.76 GiB	/data/underscanner/bags/2026-10-29_Grotte-Aldene_04/2026-10-29_Grotte-Aldene_04_0.db3
+23G	/data/underscanner/bags

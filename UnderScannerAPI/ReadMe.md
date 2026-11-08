@@ -110,6 +110,29 @@ curl.exe http://10.42.0.1:8000/status
 curl.exe http://10.42.0.1:8000/scans
 ```
 
+## Clé USB : autoriser le backend à la monter (une seule fois)
+
+Le backend tourne sans sudo. Il monte les clés USB via **udisks2**, ce qui demande une
+autorisation polkit pour l'utilisateur `orin4slam` (le service n'a pas de session graphique,
+donc polkit refuse par défaut). Le Jetson a polkit **0.105** : l'autorisation est un fichier
+`.pkla`, versionné ici dans `UnderScannerAPI/system/50-underscanner-usb.pkla`. Il ne couvre que
+les disques **amovibles** (monter, démonter, éteindre) — pas les disques internes.
+
+Depuis le PC (Git Bash), connecté au point d'accès du Jetson :
+```bash
+scp UnderScannerAPI/system/50-underscanner-usb.pkla orin4slam@10.42.0.1:
+ssh -t orin4slam@10.42.0.1 "sudo install -m 644 -o root -g root 50-underscanner-usb.pkla /etc/polkit-1/localauthority/50-local.d/ && rm 50-underscanner-usb.pkla && sudo systemctl restart polkit"
+```
+Vérifier (ne monte rien, demande juste à polkit) — chaque ligne doit finir par `-> 0` :
+```bash
+ssh orin4slam@10.42.0.1 'for a in filesystem-mount filesystem-mount-other-seat power-off-drive-other-seat; do pkcheck --action-id org.freedesktop.udisks2.$a --process $$; echo "$a -> $?"; done'
+```
+Pour retirer l'autorisation : `sudo rm /etc/polkit-1/localauthority/50-local.d/50-underscanner-usb.pkla && sudo systemctl restart polkit`.
+
+Limites à connaître : en **FAT32**, un fichier ne peut pas dépasser 4 Go (le backend refuse
+alors la copie et dit quel fichier) ; exFAT / NTFS n'ont pas cette limite. Une clé en **ext4**
+se monte avec une racine appartenant à root, donc non inscriptible par le service.
+
 
 
 # Après MAJ du fichier app.py
