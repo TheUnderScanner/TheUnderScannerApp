@@ -7,6 +7,8 @@ import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -25,6 +27,7 @@ import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
+import kotlinx.coroutines.launch
 
 private fun formatElapsed(s: Long): String = "%d:%02d".format(s / 60, s % 60)
 
@@ -36,6 +39,7 @@ private fun formatElapsed(s: Long): String = "%d:%02d".format(s / 60, s % 60)
 @Composable
 fun ControlRoomScreen(
     viewModel: ScanControlViewModel,
+    slamViewModel: SlamViewModel,
     onBack: () -> Unit,
     onOpenSettings: () -> Unit,
     onOpenActive: () -> Unit
@@ -119,6 +123,15 @@ fun ControlRoomScreen(
                         Text("Scan en cours", style = MaterialTheme.typography.titleMedium)
                         Spacer(Modifier.height(4.dp))
                         Text(scanStatus?.scan ?: "—", style = MaterialTheme.typography.bodyMedium)
+                        scanStatus?.slam?.let { slam ->
+                            Text(
+                                slam.title + if (slam.overrides.isNotEmpty())
+                                    " · modifié : ${slam.overridesText}" else "",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 2, overflow = TextOverflow.Ellipsis
+                            )
+                        }
                         Text(
                             "Durée ${formatElapsed(scanStatus?.elapsedS ?: 0)}",
                             style = MaterialTheme.typography.bodySmall,
@@ -236,10 +249,14 @@ fun ControlRoomScreen(
     if (showStartDialog) {
         StartScanDialog(
             initialLocation = viewModel.lastLocation,
-            onStart = { location ->
+            slam = slamViewModel,
+            onStart = { location, algo, profile, overrides ->
                 showStartDialog = false
                 viewModel.startScan(
                     location = location,
+                    algo = algo,
+                    profile = profile,
+                    overrides = overrides,
                     onActive = onOpenActive,
                     onError = { msg -> Toast.makeText(context, msg, Toast.LENGTH_LONG).show() }
                 )
@@ -252,8 +269,8 @@ fun ControlRoomScreen(
 /**
  * Feedback while `POST /scan/start` is in flight.
  *
- * The backend blocks for at least 5 s on purpose — it sleeps 3 s after spawning the Livox
- * driver and 2 s after SLAM so each has time to come up before the bag recorder starts.
+ * The backend takes ~6 s on purpose — it waits 3 s after spawning the Livox driver, 2 s
+ * after SLAM and 1 s after the bag recorder, checking each is still alive.
  * Without this the user taps and watches an idle screen, so the stage text is timed to
  * that real sequence rather than being a decorative fake progress bar.
  */
@@ -293,18 +310,65 @@ private fun StartingScanCard() {
     }
 }
 
+/**
+ * Scan preparation: location, SLAM algo + profile (prefilled with the Jetson's defaults) and
+ * optional one-off "key: value" overrides. "Démarrer" first asks the server to validate the
+ * profile + overrides (`/slam/{algo}/validate`) and only starts if that passes — errors are
+ * listed with their line and the dialog stays open. Overrides are deliberately not remembered
+ * between scans: they are one-off trials (a lasting change belongs in a profile).
+ *
+ * Against a backend without `/slam` (older than 2.3) the SLAM fields are hidden and the scan
+ * starts with whatever config the Jetson uses.
+ */
 @Composable
 private fun StartScanDialog(
     initialLocation: String,
-    onStart: (String) -> Unit,
+    slam: SlamViewModel,
+    onStart: (location: String, algo: String?, profile: String?, overrides: String?) -> Unit,
     onDismiss: () -> Unit
 ) {
+    val scope = rememberCoroutineScope()
     var location by remember { mutableStateOf(initialLocation) }
+    LaunchedEffect(Unit) { slam.refresh() }
+
+    val algos = slam.algos
+    val algo = slam.algo
+    // The profile shown starts on the selected algo's default and follows algo changes.
+    var profile by remember(algo, slam.defaultProfile) { mutableStateOf(slam.defaultProfile) }
+    var overrides by remember { mutableStateOf("") }
+    var showOverrides by remember { mutableStateOf(false) }
+    var checking by remember { mutableStateOf(false) }
+    var issues by remember { mutableStateOf<List<SlamIssue>>(emptyList()) }
+    var failure by remember { mutableStateOf<String?>(null) }
+    val slamReady = algos != null && algo != null && profile != null
+
+    fun start() {
+        if (!slamReady) {                       // backend without /slam: legacy start
+            onStart(location, null, null, null)
+            return
+        }
+        checking = true
+        failure = null
+        scope.launch {
+            slam.validateForScan(algo!!, profile, overrides).fold(
+                onSuccess = { v ->
+                    issues = v.issues
+                    if (v.ok) onStart(location, algo, profile, overrides.ifBlank { null })
+                },
+                onFailure = { failure = SlamViewModel.describe(it) }
+            )
+            checking = false
+        }
+    }
+
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("Nouveau scan") },
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Column(
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+                modifier = Modifier.verticalScroll(rememberScrollState())
+            ) {
                 OutlinedTextField(
                     value = location,
                     onValueChange = { location = it },
@@ -318,13 +382,100 @@ private fun StartScanDialog(
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
+
+                if (algos == null) {
+                    Text(
+                        if (slam.loading) "Chargement des profils SLAM…"
+                        else "Profils SLAM indisponibles${slam.error?.let { " ($it)" } ?: ""} : " +
+                            "le scan utilisera la config par défaut du Jetson.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                } else {
+                    if (algos.algos.size > 1) {
+                        ChoiceField(
+                            label = "Algorithme SLAM",
+                            value = slam.algoInfo?.label ?: "—",
+                            options = algos.algos.map { it.id to it.label },
+                            onSelect = { slam.selectAlgo(it); issues = emptyList() }
+                        )
+                    }
+                    ChoiceField(
+                        label = "Profil ${slam.algoInfo?.label ?: ""}".trim(),
+                        value = profile ?: "—",
+                        options = slam.profiles.map {
+                            it.name to (it.name + if (it.isDefault) " (par défaut)" else "")
+                        },
+                        enabled = slam.profiles.isNotEmpty(),
+                        onSelect = { profile = it; issues = emptyList() }
+                    )
+
+                    TextButton(
+                        onClick = { showOverrides = !showOverrides },
+                        contentPadding = PaddingValues(0.dp)
+                    ) {
+                        Icon(if (showOverrides) Icons.Default.ExpandLess else Icons.Default.ExpandMore, null)
+                        Spacer(Modifier.width(4.dp))
+                        Text(
+                            "Modifications pour ce scan" +
+                                if (overrides.isNotBlank() && !showOverrides) " (${overrides.lines().count { it.isNotBlank() }})" else ""
+                        )
+                    }
+                    if (showOverrides) {
+                        OutlinedTextField(
+                            value = overrides,
+                            onValueChange = { overrides = it; issues = emptyList() },
+                            placeholder = {
+                                Text("filter_size_map: 0.3\nmapping.det_range: 60",
+                                    fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace)
+                            },
+                            textStyle = MaterialTheme.typography.bodySmall.copy(
+                                fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace
+                            ),
+                            minLines = 3,
+                            keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
+                                capitalization = androidx.compose.ui.text.input.KeyboardCapitalization.None,
+                                autoCorrectEnabled = false,
+                                keyboardType = androidx.compose.ui.text.input.KeyboardType.Ascii
+                            ),
+                            isError = issues.any { it.isError && it.where == "overrides" },
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                        Text(
+                            "Une ligne « clé: valeur » par paramètre ; « section.clé » si le nom est " +
+                                "ambigu. Pour ce scan seulement — un réglage durable va dans un profil.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+
+                failure?.let {
+                    Text("Vérification impossible : $it", color = MaterialTheme.colorScheme.error,
+                        style = MaterialTheme.typography.bodySmall)
+                }
+                issues.sortedBy { !it.isError }.forEach { issue ->
+                    Text(
+                        (if (issue.isError) "✖ " else "⚠ ") +
+                            (if (issue.where == "overrides") "Modif." else "Profil") +
+                            (issue.line?.let { " ligne $it" } ?: "") + " : " + issue.msg,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = if (issue.isError) MaterialTheme.colorScheme.error
+                                else MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
             }
         },
         confirmButton = {
-            Button(onClick = { onStart(location) }) {
-                Icon(Icons.Default.PlayArrow, null)
+            Button(onClick = { start() }, enabled = !checking && !(algos == null && slam.loading)) {
+                if (checking) {
+                    CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp,
+                        color = LocalContentColor.current)
+                } else {
+                    Icon(Icons.Default.PlayArrow, null)
+                }
                 Spacer(Modifier.width(6.dp))
-                Text("Démarrer")
+                Text(if (checking) "Vérification…" else "Démarrer")
             }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Annuler") } }

@@ -219,15 +219,26 @@ class ScanControlViewModel(app: Application) : AndroidViewModel(app) {
     // Start / stop
     // -----------------------------------------------------------------------
 
-    /** Start a new scan. [onActive] is invoked when the active-scan screen should open. */
-    fun startScan(location: String, onActive: () -> Unit, onError: (String) -> Unit) {
+    /**
+     * Start a new scan. [algo]/[profile] null = the Jetson's defaults; [overrides] = per-scan
+     * "key: value" lines (already validated by the start dialog, and re-validated server-side).
+     * [onActive] is invoked when the active-scan screen should open.
+     */
+    fun startScan(
+        location: String,
+        algo: String? = null,
+        profile: String? = null,
+        overrides: String? = null,
+        onActive: () -> Unit,
+        onError: (String) -> Unit
+    ) {
         if (_phase.value == ControlPhase.Starting) return
         syncBaseUrl()
         _phase.value = ControlPhase.Starting
         _message.value = null
         val loc = location.ifBlank { settings.lastLocation }
         viewModelScope.launch {
-            client.startScan(loc).fold(
+            client.startScan(loc, algo, profile, overrides).fold(
                 onSuccess = { result ->
                     if (loc.isNotBlank()) settings.lastLocation = loc
                     previewCloud.clear()
@@ -247,7 +258,12 @@ class ScanControlViewModel(app: Application) : AndroidViewModel(app) {
                         onActive()
                     } else {
                         _phase.value = ControlPhase.Idle
-                        onError(e.message ?: "Échec du démarrage")
+                        val first = (e as? SlamConfigException)?.issues?.firstOrNull { it.isError }
+                        onError(
+                            if (first != null) "Config refusée : ${first.msg}" +
+                                (first.line?.let { " (ligne $it)" } ?: "")
+                            else e.message ?: "Échec du démarrage"
+                        )
                     }
                 }
             )

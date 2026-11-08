@@ -175,6 +175,7 @@ fun AppNavHost() {
         composable("controlRoom") {
             ControlRoomScreen(
                 viewModel = controlViewModel,
+                slamViewModel = slamViewModel,
                 onBack = { navController.popBackStack() },
                 onOpenSettings = { navController.navigate("settings") },
                 onOpenActive = { navController.navigate("activeScan") }

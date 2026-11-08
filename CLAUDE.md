@@ -33,6 +33,10 @@ Current version: `v0.1.0` (Early development stage)
 
 **Scope: Phase 1 (file browsing) + Phase 2 (scan control + live preview) are done.** The app
 can browse/download/view scans, and start/stop a scan with a live accumulating 3D preview.
+**SLAM config profiles** are done too: per-algo YAML profiles stored on the Jetson, edited as
+text from Settings (server-validated), chosen per scan with optional one-off overrides; each scan
+archives the exact config it ran (`configs/<scan>.yaml` + `.json`). Only FAST-LIO2 is
+registered; the registry (`slamcfg.py`) is ready for more algos.
 
 ## Build System
 
@@ -345,7 +349,15 @@ drawn as a yellow polyline (`Trajectory.kt` + `MyGLRenderer.drawTrajectory`, `GL
   Shared between Control Room and Active Scan so preview/state survive navigation; never
   stops the scan implicitly.
 - **ScanControlScreens.kt** — `ControlRoomScreen` (New Scan + sticky location, resume-running
-  banner; secondary **SSH** and destructive **Power OFF** actions) and `ActiveScanScreen`
+  banner showing the running scan's algo · profile · overrides; secondary **SSH** and destructive
+  **Power OFF** actions) and `ActiveScanScreen`
+  - **Start dialog** (`StartScanDialog`): location, SLAM algo (picker only if >1) + profile,
+    both prefilled with the Jetson's defaults (`SlamViewModel`), and a collapsible
+    *Modifications pour ce scan* field (`key: value` lines). *Démarrer* first calls
+    `/slam/{algo}/validate` (stored profile + overrides) and only starts when it passes; errors
+    stay listed in the dialog with their line. Overrides are **not** remembered between scans
+    (one-off trials; lasting changes belong in a profile). Against a backend without `/slam`
+    the SLAM fields are hidden and the scan starts with the Jetson's own config.
   - **Starting a scan takes ~6 s server-side** (`app.py` waits 3 s after spawning the Livox
     driver, 2 s after SLAM and 1 s after the bag recorder, checking each is still alive; the
     waits are non-blocking, so polls keep answering meanwhile). The Control Room
@@ -460,7 +472,8 @@ drawn as a yellow polyline (`Trajectory.kt` + `MyGLRenderer.drawTrajectory`, `GL
 5. **Config**: `GET /scans/{name}/config` shown read-only (monospaced, copyable).
 6. **Notes**: `GET` populates the form; **Save** does `PUT` with the form as a JSON object.
 
-**Live scan (Phase 2):** Control Room → New Scan (`POST /scan/start`) → Active Scan opens the
+**Live scan (Phase 2):** Control Room → New Scan (validate algo/profile/overrides, then
+`POST /scan/start`; the Jetson writes `configs/<scan>.yaml` and runs SLAM on it) → Active Scan opens the
 `/ws/preview` WebSocket; binary frames accumulate into `PreviewCloud` (rendered live), pose
 updates the position marker, the HUD reflects `/scan/status`. **Stop & Save**
 (`POST /scan/stop`) closes the socket, shows the pcd/bag summary, and the finished scan appears
