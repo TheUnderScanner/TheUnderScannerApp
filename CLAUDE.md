@@ -97,9 +97,15 @@ the address is fixed). The base URL stays editable in the app's Settings; defaul
 | GET | `/scans/{name}/health` | Per-scan health log | JSONL body; **404** if none |
 | GET | `/system/health` | Live Jetson telemetry | latest cached sample + `static` |
 | POST | `/clock` | Sync wall-clock offset; body `{client_time_ms}` | `{ok, time, clock_offset_s}`; **400** if implausible |
-| POST | `/scan/start` | Start a scan; body `{location, client_time_ms, client_date}` | `{scan, running, started_at}`; **409** if running/starting or 99 runs taken; **500** + `detail` if a stage dies during warm-up |
-| POST | `/scan/stop` | Stop + save | `{scan, running:false, pcd, bag}`; **409** if none |
-| GET | `/scan/status` | Poll scan state | `{running, starting, scan, started_at, elapsed_s, odom_ok, cloud_ok}` |
+| POST | `/scan/start` | Start a scan; body `{location, client_time_ms, client_date, algo?, profile?, overrides?}` | `{scan, running, started_at, slam}`; **422** bad profile/overrides (nothing spawned); **409** if running/starting or 99 runs taken; **500** + `detail` if a stage dies during warm-up |
+| POST | `/scan/stop` | Stop + save | `{scan, running:false, pcd, bag, slam}`; **409** if none |
+| GET | `/scan/status` | Poll scan state | `{running, starting, scan, started_at, elapsed_s, odom_ok, cloud_ok, slam}` |
+| GET | `/slam/algos` | SLAM algo registry | `{default, algos:[{id, label, description, forced, live, default_profile}]}` |
+| GET/PUT | `/slam/defaults` | Default algo + profile per algo | `{algo, profiles:{algo: name}}`; PUT `{algo?, profiles?}` or `{algo?, profile}` |
+| GET | `/slam/{algo}/profiles` | Profile list | `{algo, default, profiles:[{name, readonly, is_default, updated}]}` |
+| GET/PUT/DELETE | `/slam/{algo}/profiles/{name}` | Profile YAML (`text/plain`) | PUT validates + normalizes → `{ok, name, text, issues}`; **422** invalid; **403** `usine`; DELETE **409** if default |
+| POST | `/slam/{algo}/profiles/{name}/copy` · `/rename` | body `{to}` | **409** name taken, **403** `usine` |
+| POST | `/slam/{algo}/validate` | Dry run; body `{yaml? \| profile?, overrides?}` | always 200: `{ok, issues:[{level,msg,line,where}], normalized?, effective?, overrides?}` |
 | WS | `/ws/preview` | Live preview stream | binary cloud frames + JSON pose / `hello`; client → `client_stats` |
 | POST | `/system/shutdown` | Power the Jetson off | `{ok}`; **409** if a scan is running or starting |
 
@@ -110,6 +116,27 @@ lock block as the `S.running` check (no `await` between them). After each warm-u
 checks the process is still alive (`poll()`); any failure raises, and `_abort_start` stops
 whatever was spawned **in a thread** and only then clears `S.starting`, so a retry can't start a
 second driver next to a dying one. The app surfaces the 500's `detail` text.
+**SLAM algos + config profiles (`slamcfg.py`, wired in `app.py`).** A registry (`ALGOS`, one
+`SlamAlgo` per algo: launch-on-a-config-file, preview cloud/odom topics, map-save command, `.pcd`
+output, imposed keys, warm-up) — only `fastlio2` today; `scan_start`/`scan_stop` and
+`PreviewNode.use_topics` only use that interface, so a new algo is a new registry entry. Profiles
+live **on the Jetson**: `DATA_ROOT/slam/<algo>/<profile>.yaml` + `slam/defaults.json`;
+`usine.yaml` is snapshotted once from `FASTLIO_CONFIG` at startup and is read-only (it's the
+reference every profile is validated against: valid YAML, no duplicate/unknown key, no type
+change — int→float is normalized since ROS rejects an int for a `double` param — list lengths
+kept; errors carry the line). Imposed keys (FAST-LIO: `map_file_path`=`.lastscan.pcd`,
+`pcd_save.pcd_save_en`, `pcd_save.interval=-1`, `common.lid/imu_topic`,
+`publish.scan_publish_en`) are rewritten whatever the profile says. Per-scan **overrides** =
+`key: value` lines, bench `--set` semantics (leaf name or dotted suffix, must exist and be
+unique). At **start**: profile + overrides + imposed keys → `configs/<scan>.yaml` (built by
+patching the profile *text* so comments survive; a header comment names algo/profile/overrides
+but never the scan, so a rename keeps it true) and `configs/<scan>.json` = `{algo, profile,
+overrides, sha256, …}`; FAST-LIO is launched with `config_path:=configs config_file:=<scan>.yaml`.
+Stop no longer copies any config. `/scans` rows carry `slam` (that meta, or `null` for pre-profile
+scans whose `.yaml` was copied from `mid360.yaml` at stop — on this Jetson that file is what ran,
+the workspace being `--symlink-install`). Rename moves the `.json` too. Tests:
+`UnderScannerAPI/tests/` (`test_slamcfg.py`, and `test_app_slam.py` = the endpoints end-to-end with
+ROS/processes faked; needs `fastapi httpx numpy`, skipped otherwise).
 **Run numbers** (`make_scan_name`): next = max run for that `date_location` across *every*
 artifact kind (`collect_scan_names()`), not only bags — a scan whose bag dir was deleted still
 owns its pcd/notes/health. Past run 99 it refuses (409): `NAME_RE` wants exactly 2 digits, so

@@ -90,23 +90,33 @@ from nav_msgs.msg import Odometry
 from sensor_msgs.msg import PointCloud2
 from sensor_msgs_py import point_cloud2
 
+import slamcfg as sc      # SLAM algo registry + config profiles (pure Python, unit-tested)
+
 # ----------------------------- config -----------------------------
 DATA_ROOT = Path(os.environ.get("UNDERSCANNER_DATA", "/data/underscanner"))
 BAGS, MAPS, CONFIGS, NOTES = (DATA_ROOT / d for d in ("bags", "maps", "configs", "notes"))
 TRAJ = DATA_ROOT / "trajectories"          # per-scan LiDAR path (/Odometry) files
 HEALTH = DATA_ROOT / "health"              # per-scan JSONL system-health logs
 SCAN_STATE = DATA_ROOT / ".current_scan"
+# FAST-LIO's shipped config. Since the SLAM-profiles work it is only the SOURCE of the
+# factory profile (slam/fastlio2/usine.yaml, snapshotted once): scans run on their own
+# configs/<scan>.yaml, never on this file.
 FASTLIO_CONFIG = Path(os.path.expanduser(
     os.environ.get("FASTLIO_CONFIG", "~/ws_fastlio/src/FAST_LIO_ROS2/config/mid360.yaml")))
-LASTSCAN_PCD = DATA_ROOT / ".lastscan.pcd"
+LASTSCAN_PCD = DATA_ROOT / ".lastscan.pcd"   # where FAST-LIO's map_save writes (imposed key)
+SLAM_ROOT = DATA_ROOT / "slam"               # profiles: slam/defaults.json, slam/<algo>/<profile>.yaml
 
-# >>> VERIFY all of these against your working setup <<<
 LIDAR_LAUNCH     = ["ros2", "launch", "livox_ros_driver2", "msg_MID360_launch.py"]
-SLAM_LAUNCH_BASE = ["ros2", "launch", "fast_lio", "mapping.launch.py"]
-SLAM_RVIZ_ARG    = "rviz:=false"          # or "" if you made a headless launch file
-MAP_SAVE_CMD     = ["ros2", "service", "call", "/map_save", "std_srvs/srv/Trigger"]
 TOPIC_LIDAR, TOPIC_IMU = "/livox/lidar", "/livox/imu"
-TOPIC_CLOUD, TOPIC_ODOM = "/cloud_registered", "/Odometry"
+
+# ---- SLAM algorithms (see slamcfg.py). scan_start/stop only use the SlamAlgo interface:
+# add an algorithm here, not in the orchestration code.
+ALGOS = [
+    sc.make_fastlio2(factory_source=FASTLIO_CONFIG, pcd_out=LASTSCAN_PCD,
+                     lidar_topic=TOPIC_LIDAR, imu_topic=TOPIC_IMU),
+]
+ALGO_BY_ID = {a.id: a for a in ALGOS}
+PROFILES = sc.ProfileStore(SLAM_ROOT, ALGOS, log=lambda m: print(m, flush=True))
 
 VOXEL    = 0.10     # preview downsample size (m); larger = sparser/lighter
 CLOUD_HZ = 4        # preview cloud frames/sec to the phone
@@ -154,7 +164,7 @@ ZONE_MAP = {"cpu-thermal": "cpu", "gpu-thermal": "gpu", "tj-thermal": "tj",
 # current (mA) but no power node, so watts are computed as V*I.
 RAIL_MAP = {"VDD_IN": "in", "VDD_CPU_GPU_CV": "cpu_gpu", "VDD_SOC": "soc"}
 
-app = FastAPI(title="Underscanner Backend", version="2.2")
+app = FastAPI(title="Underscanner Backend", version="2.3")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 # ----------------------------- helpers -----------------------------
@@ -281,6 +291,8 @@ class State:
         # with the warm-up sleeps, now that those no longer block the event loop.
         self.starting = False
         self.scan = None
+        self.algo: sc.SlamAlgo | None = None    # algo of the running scan (stop needs its save)
+        self.slam: dict | None = None           # {algo, profile, overrides} of the running scan
         self.started_at = None
         self.procs: dict[str, subprocess.Popen] = {}
         self.latest_cloud: bytes | None = None    # packed binary frame
@@ -539,17 +551,34 @@ H = HealthMonitor()
 
 # ----------------------------- ROS node -----------------------------
 class PreviewNode(Node):
-    def __init__(self):
+    """Feeds the live preview from the running algo's cloud + pose topics (from its
+    SlamAlgo entry). Starts on the default algo's topics; scan_start re-points it."""
+    def __init__(self, algo: sc.SlamAlgo):
         super().__init__("underscanner_preview")
         self._fields_logged = False
-        self.create_subscription(PointCloud2, TOPIC_CLOUD, self.on_cloud, 10)
-        self.create_subscription(Odometry,   TOPIC_ODOM,  self.on_odom, 10)
+        self._topics = (None, None)
+        self._subs = []
+        self._sub_lock = threading.Lock()
+        self.use_topics(algo.cloud_topic, algo.odom_topic)
+
+    def use_topics(self, cloud: str, odom: str):
+        """(Re)subscribe when an algo publishes elsewhere. A no-op for the same topics."""
+        with self._sub_lock:
+            if (cloud, odom) == self._topics:
+                return
+            for s in self._subs:
+                self.destroy_subscription(s)
+            self._subs = [self.create_subscription(PointCloud2, cloud, self.on_cloud, 10),
+                          self.create_subscription(Odometry, odom, self.on_odom, 10)]
+            self._topics = (cloud, odom)
+            self._fields_logged = False
+            self.get_logger().info(f"preview topics: cloud={cloud} odom={odom}")
 
     def on_cloud(self, msg):
         present = {f.name for f in msg.fields}
         if not self._fields_logged:
-            # one-time: reveals whether tag / line survive to /cloud_registered
-            self.get_logger().info(f"{TOPIC_CLOUD} point fields: {sorted(present)}")
+            # one-time: reveals whether tag / line survive to the cloud topic
+            self.get_logger().info(f"{self._topics[0]} point fields: {sorted(present)}")
             self._fields_logged = True
 
         if not {"x", "y", "z"} <= present:
@@ -633,6 +662,19 @@ async def set_clock(request: Request):
     return {"ok": True, "time": wall_now().isoformat(timespec="seconds"),
             "clock_offset_s": round(_clock["offset"], 1)}
 
+SLAM_META_KEYS = ("algo", "algo_label", "profile", "overrides", "sha256")
+
+def scan_slam_meta(name: str) -> dict | None:
+    """configs/<scan>.json, written at scan start: which algo/profile/overrides produced
+    configs/<scan>.yaml (+ its sha256). None for scans from before SLAM profiles, whose
+    .yaml was copied from FAST-LIO's mid360.yaml at stop."""
+    f = CONFIGS / f"{name}.json"
+    try:
+        d = json.loads(f.read_text(encoding="utf-8"))
+        return {k: d.get(k) for k in SLAM_META_KEYS} if isinstance(d, dict) else None
+    except Exception:
+        return None
+
 @app.get("/scans")
 def list_scans():
     out = []
@@ -657,7 +699,8 @@ def list_scans():
                     "pcd":{"present":pcd.exists(),"size_bytes":ps,"size_human":human(ps)},
                     "config":{"present":cfg.exists()},"notes":{"present":note.exists(), "text": note_text},
                     "trajectory":{"present":traj.exists()},
-                    "health":{"present":hlog.exists(),"size_bytes":hs,"size_human":human(hs)}})
+                    "health":{"present":hlog.exists(),"size_bytes":hs,"size_human":human(hs)},
+                    "slam":scan_slam_meta(name)})
     return {"scans": out}
 
 @app.get("/scans/{name}/pcd")
@@ -709,8 +752,11 @@ async def put_notes(name: str, request: Request):
 
 def scan_artifacts(name: str) -> list[Path]:
     """Every on-disk artifact of a scan, keyed by its name. Keep in sync with
-    collect_scan_names() and scan_stop() — rename moves exactly this list."""
+    collect_scan_names() and scan_start/stop() — rename moves exactly this list.
+    configs/<scan>.json (SLAM meta) is renamed with the rest; the effective .yaml's header
+    comment never names the scan, so its sha256 stays valid across a rename."""
     return [BAGS / name, MAPS / f"{name}.pcd", CONFIGS / f"{name}.yaml",
+            CONFIGS / f"{name}.json",
             NOTES / f"{name}.json", TRAJ / f"{name}.traj", HEALTH / f"{name}.jsonl"]
 
 def _retitle_health_header(path: Path, new_name: str):
@@ -822,10 +868,141 @@ def preview_format():
         ],
     }
 
+# ===================== SLAM ALGOS + CONFIG PROFILES =====================
+# Profiles live on the Jetson (slam/<algo>/<profile>.yaml); the phone only edits them
+# through these endpoints. Every write is validated against the factory config first
+# (slamcfg.check_profile). Error bodies: {"detail": {"msg", "issues": [{level, msg, line,
+# where}]}} for 422, a plain string detail otherwise.
+def _slam_errors(fn, *args, **kwargs):
+    """Run a ProfileStore / slamcfg call, mapping its exceptions to HTTP errors."""
+    try:
+        return fn(*args, **kwargs)
+    except sc.ConfigError as e:
+        raise HTTPException(422, {"msg": str(e), "issues": [i.as_dict() for i in e.issues]})
+    except sc.NotFound as e:
+        raise HTTPException(404, str(e))
+    except sc.Conflict as e:
+        raise HTTPException(409, str(e))
+    except sc.Forbidden as e:
+        raise HTTPException(403, str(e))
+    except sc.BadRequest as e:
+        raise HTTPException(400, str(e))
+
+async def _json_body(request: Request) -> dict:
+    try:
+        body = await request.json()
+    except Exception:
+        body = None
+    if not isinstance(body, dict):
+        raise HTTPException(400, "corps JSON (objet) attendu")
+    return body
+
+def overrides_text(v) -> str:
+    """Per-scan overrides as "key: value" lines. Accepts that text, a list of lines, or a
+    {key: value} object (bench --set style)."""
+    if v is None:
+        return ""
+    if isinstance(v, str):
+        return v
+    if isinstance(v, list) and all(isinstance(x, str) for x in v):
+        return "\n".join(v)
+    if isinstance(v, dict):
+        try:
+            return "\n".join(f"{k}: {sc.fmt_value(val)}" for k, val in v.items())
+        except TypeError as e:
+            raise HTTPException(400, f"overrides : {e}")
+    raise HTTPException(400, "overrides : texte « clé: valeur » attendu")
+
+@app.get("/slam/algos")
+def slam_algos():
+    d = PROFILES.defaults()
+    return {"default": d["algo"],
+            "algos": [dict(a.describe(), default_profile=d["profiles"].get(a.id, sc.FACTORY))
+                      for a in ALGOS]}
+
+@app.get("/slam/defaults")
+def slam_defaults_get():
+    return PROFILES.defaults()
+
+@app.put("/slam/defaults")
+async def slam_defaults_put(request: Request):
+    """Body {algo?, profiles?: {algo: profile}} — or {algo, profile} for one algo."""
+    body = await _json_body(request)
+    profiles = body.get("profiles")
+    if profiles is None and body.get("profile") is not None:
+        profiles = {body.get("algo") or PROFILES.defaults()["algo"]: body["profile"]}
+    if profiles is not None and not isinstance(profiles, dict):
+        raise HTTPException(400, "profiles : objet {algo: profil} attendu")
+    return _slam_errors(PROFILES.set_defaults, algo=body.get("algo"), profiles=profiles)
+
+@app.get("/slam/{algo}/profiles")
+def slam_profiles(algo: str):
+    lst = _slam_errors(PROFILES.list, algo)
+    return {"algo": algo, "default": PROFILES.defaults()["profiles"].get(algo),
+            "profiles": [{"name": p["name"], "readonly": p["readonly"],
+                          "is_default": p["is_default"], "updated": iso(p["mtime"])}
+                         for p in lst]}
+
+@app.get("/slam/{algo}/profiles/{name}", response_class=PlainTextResponse)
+def slam_profile_get(algo: str, name: str):
+    return _slam_errors(PROFILES.read, algo, name)
+
+@app.put("/slam/{algo}/profiles/{name}")
+async def slam_profile_put(algo: str, name: str, request: Request):
+    """Body = the profile's YAML text (text/plain). Validated, normalized, then written;
+    creates the profile if it doesn't exist. 422 with line-numbered issues if invalid."""
+    try:
+        text = (await request.body()).decode("utf-8")
+    except UnicodeDecodeError:
+        raise HTTPException(400, "texte UTF-8 attendu")
+    normalized, warnings = _slam_errors(PROFILES.save, algo, name, text)
+    return {"ok": True, "name": name, "text": normalized,
+            "issues": [w.as_dict() for w in warnings]}
+
+@app.delete("/slam/{algo}/profiles/{name}")
+def slam_profile_delete(algo: str, name: str):
+    _slam_errors(PROFILES.delete, algo, name)
+    return {"ok": True}
+
+@app.post("/slam/{algo}/profiles/{name}/copy")
+async def slam_profile_copy(algo: str, name: str, request: Request):
+    to = (await _json_body(request)).get("to")
+    _slam_errors(PROFILES.copy, algo, name, to)
+    return {"ok": True, "name": to}
+
+@app.post("/slam/{algo}/profiles/{name}/rename")
+async def slam_profile_rename(algo: str, name: str, request: Request):
+    to = (await _json_body(request)).get("to")
+    _slam_errors(PROFILES.rename, algo, name, to)
+    return {"ok": True, "name": to}
+
+@app.post("/slam/{algo}/validate")
+async def slam_validate(algo: str, request: Request):
+    """Dry run, never writes. Body {yaml?, profile?, overrides?}: checks `yaml` (editor
+    text) or else the stored `profile` (default profile if neither), plus the overrides.
+    Always 200 for a validation outcome: {ok, issues, normalized?, effective?, overrides?}.
+    `effective` is the config a scan would run with (without the header comment)."""
+    body = await _json_body(request)
+    a = _slam_errors(PROFILES.algo, algo)
+    factory = _slam_errors(PROFILES.factory_text, algo)
+    text = body.get("yaml")
+    if text is None:
+        _, _, text = _slam_errors(PROFILES.resolve, algo, body.get("profile"))
+    if not isinstance(text, str):
+        raise HTTPException(400, "yaml : texte attendu")
+    ovr = overrides_text(body.get("overrides"))
+    try:
+        eff = sc.build_effective(a, factory, text, ovr)
+        normalized, _ = sc.check_profile(a, factory, text)
+    except sc.ConfigError as e:
+        return {"ok": False, "issues": [i.as_dict() for i in e.issues]}
+    return {"ok": True, "issues": [w.as_dict() for w in eff.warnings],
+            "normalized": normalized, "effective": eff.text, "overrides": eff.overrides}
+
 # ====================== ORCHESTRATION (Phase 2) ======================
 DRIVER_WARMUP_S = 3.0   # let the Livox driver come up before SLAM subscribes
-SLAM_WARMUP_S   = 2.0   # let FAST-LIO init before the bag starts
 BAG_WARMUP_S    = 1.0   # only to catch a recorder that dies at once (e.g. output dir exists)
+# (the SLAM warm-up is per algo: SlamAlgo.warmup_s)
 
 async def _launch(name: str, cmd: list[str], warmup_s: float):
     """Spawn a stage, wait for it to settle WITHOUT blocking the event loop (the preview
@@ -838,25 +1015,68 @@ async def _launch(name: str, cmd: list[str], warmup_s: float):
     if rc is not None:
         raise RuntimeError(f"« {name} » s'est arrêté au démarrage (code {rc})")
 
-def _abort_start():
-    """Undo a failed start: stop whatever was spawned, newest first. Runs in a thread
-    (stop_proc waits up to 8 s per process) and releases the start claim only once the
-    processes are gone, so a retry can't launch a second driver next to a dying one."""
+def _abort_start(name: str | None = None):
+    """Undo a failed start: stop whatever was spawned, newest first, and drop the configs
+    written for a scan that never recorded (else it would list as a config-only scan).
+    Runs in a thread (stop_proc waits up to 8 s per process) and releases the start claim
+    only once the processes are gone, so a retry can't launch a second driver next to a
+    dying one."""
     try:
         for p in ("bag", "slam", "driver"):
             stop_proc(p, signal.SIGINT)
+        if name and not (BAGS / name).exists():
+            for f in (CONFIGS / f"{name}.yaml", CONFIGS / f"{name}.json"):
+                try: f.unlink()
+                except FileNotFoundError: pass
     finally:
         with S.lock:
             S.starting = False
 
+def write_scan_config(name: str, algo: sc.SlamAlgo, profile: str, profile_text: str,
+                      ovr_text: str) -> tuple[Path, dict]:
+    """Build the effective config (profile + overrides + imposed keys), write it as
+    configs/<scan>.yaml — the exact file the algo is launched on — and its provenance as
+    configs/<scan>.json. Raises sc.ConfigError before writing anything if invalid."""
+    def header(applied: dict) -> list[str]:
+        # Never the scan name: a rename would make the comment stale (and the sha is of
+        # this exact text). Plain YAML comments: the ROS parameter parser skips them.
+        ovr = ", ".join(f"{k}={sc.fmt_value(v)}" for k, v in applied.items()) or "aucun"
+        return [f"UnderScanner - config effective : algo {algo.id}, profil {profile}",
+                f"overrides : {ovr}",
+                "cles imposees par le backend : " + ", ".join(algo.forced)]
+    eff = sc.build_effective(algo, PROFILES.factory_text(algo.id), profile_text, ovr_text,
+                             header=header)
+    cfg = CONFIGS / f"{name}.yaml"
+    cfg.write_text(eff.text, encoding="utf-8")
+    meta = {"v": 1, "algo": algo.id, "algo_label": algo.label, "profile": profile,
+            "overrides": eff.overrides, "overrides_text": ovr_text,
+            "sha256": eff.sha256, "preserved_layout": eff.preserved,
+            "warnings": [w.as_dict() for w in eff.warnings],
+            "created_at": wall_now().isoformat(timespec="seconds")}
+    (CONFIGS / f"{name}.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2),
+                                          encoding="utf-8")
+    return cfg, meta
+
 @app.post("/scan/start")
 async def scan_start(request: Request):
+    """Body {location?, client_time_ms?, client_date?, algo?, profile?, overrides?}; the
+    SLAM fields default to slam/defaults.json. The effective config is written to
+    configs/<scan>.yaml and the algo is launched ON THAT FILE, so the archived config is
+    exactly what ran. 422 {detail: {msg, issues}} when the profile/overrides are invalid
+    (nothing is launched)."""
     try:
         body = (await request.json()) or {}
     except Exception:
         body = {}
     if not isinstance(body, dict):
         body = {}
+
+    # Resolve + validate the SLAM config before claiming the device: a typo in the
+    # overrides costs nothing and never spawns a process.
+    algo, profile, profile_text = _slam_errors(PROFILES.resolve, body.get("algo"), body.get("profile"))
+    ovr_text = overrides_text(body.get("overrides"))
+    _slam_errors(sc.build_effective, algo, _slam_errors(PROFILES.factory_text, algo.id),
+                 profile_text, ovr_text)
 
     # Check-and-claim with no await in between, so two starts can't both get past it.
     with S.lock:
@@ -865,22 +1085,26 @@ async def scan_start(request: Request):
         S.starting = True
 
     launched = False
+    name = None
     try:
         set_clock_from_client(body.get("client_time_ms"))
         for d in (BAGS, MAPS, CONFIGS, NOTES, TRAJ, HEALTH): d.mkdir(parents=True, exist_ok=True)
         name = make_scan_name(body.get("location"), body.get("client_date"))
+        cfg, meta = _slam_errors(write_scan_config, name, algo, profile, profile_text, ovr_text)
         SCAN_STATE.write_text(name)
+        if PREVIEW_NODE is not None:
+            PREVIEW_NODE.use_topics(algo.cloud_topic, algo.odom_topic)
 
         await _launch("driver", LIDAR_LAUNCH, DRIVER_WARMUP_S)
-        slam_cmd = list(SLAM_LAUNCH_BASE) #+ [f"map_file_path:={MAPS}/{name}.pcd"]
-        if SLAM_RVIZ_ARG: slam_cmd.append(SLAM_RVIZ_ARG)
-        await _launch("slam", slam_cmd, SLAM_WARMUP_S)
+        await _launch("slam", algo.launch_cmd(cfg), algo.warmup_s)
         await _launch("bag", ["ros2","bag","record",TOPIC_LIDAR,TOPIC_IMU,"-o",str(BAGS / name)],
                       BAG_WARMUP_S)
 
+        slam = {k: meta[k] for k in ("algo", "profile", "overrides")}
         with S.lock:
             S.running, S.starting = True, False
             S.scan, S.started_at = name, time.time()
+            S.algo, S.slam = algo, slam
             S.trajectory, S.traj_last = [], None
             started_at = S.started_at
         launched = True
@@ -892,24 +1116,26 @@ async def scan_start(request: Request):
         # Also covers cancellation. Cleanup runs off the event loop; S.starting stays
         # True until it finishes.
         if not launched:
-            threading.Thread(target=_abort_start, daemon=True).start()
+            threading.Thread(target=_abort_start, args=(name,), daemon=True).start()
 
     H.open_log(name, started_at)
-    return {"scan":name,"running":True,"started_at":iso(started_at)}
+    return {"scan":name,"running":True,"started_at":iso(started_at),"slam":slam}
 
 @app.post("/scan/stop")
 def scan_stop():
     with S.lock:
         if not S.running: raise HTTPException(409, "no scan running")
         name = S.scan
-    try: subprocess.run(MAP_SAVE_CMD, timeout=30)          # save while SLAM alive
+        algo = S.algo or ALGOS[0]
+    out = algo.pcd_out
+    try: subprocess.run(list(algo.save_cmd), timeout=30)   # save while SLAM alive
     except Exception: pass
 
     # wait for the .pcd write to finish before killing SLAM (avoid truncation)
-    if LASTSCAN_PCD.exists():
+    if out.exists():
         last = -1
         for _ in range(20):                                # up to ~10s
-            sz = LASTSCAN_PCD.stat().st_size
+            sz = out.stat().st_size
             if sz > 0 and sz == last: break                # size stable two checks running
             last = sz; time.sleep(0.5)
 
@@ -919,14 +1145,11 @@ def scan_stop():
 
     # SLAM is dead now, so moving the file is unambiguously safe
     try:
-        if LASTSCAN_PCD.exists():
-            LASTSCAN_PCD.replace(MAPS / f"{name}.pcd")     # atomic move within /data
+        if out.exists():
+            out.replace(MAPS / f"{name}.pcd")              # atomic move within /data
     except Exception: pass
-
-    try:
-        if FASTLIO_CONFIG.exists():
-            (CONFIGS / f"{name}.yaml").write_text(FASTLIO_CONFIG.read_text())
-    except Exception: pass
+    # The config is NOT copied here any more: configs/<scan>.yaml was written at start
+    # and is the very file the algo ran on.
 
     # Persist the accumulated LiDAR path for the saved-scan viewer.
     try:
@@ -940,14 +1163,17 @@ def scan_stop():
     H.close_log()                                          # flush + close the health log
 
     with S.lock:
+        slam = S.slam
         S.running, S.scan, S.started_at = False, None, None
+        S.algo, S.slam = None, None
         S.latest_cloud, S.latest_pose = None, None
         S.trajectory, S.traj_last = [], None
 
     pcd, bag = MAPS / f"{name}.pcd", BAGS / name
     return {"scan":name,"running":False,
             "pcd":{"present":pcd.exists(),"size_human":human(dir_size(pcd))},
-            "bag":{"present":bag.exists(),"size_human":human(dir_size(bag))}}
+            "bag":{"present":bag.exists(),"size_human":human(dir_size(bag))},
+            "slam":slam}
 
 @app.get("/scan/status")
 def scan_status():
@@ -957,7 +1183,8 @@ def scan_status():
                 "started_at":iso(S.started_at) if S.started_at else None,
                 "elapsed_s":round(now - S.started_at,1) if S.started_at else 0,
                 "odom_ok":(now - S.last_odom_t) < 2.0,
-                "cloud_ok":(now - S.last_cloud_t) < 2.0}
+                "cloud_ok":(now - S.last_cloud_t) < 2.0,
+                "slam":S.slam}
 
 
 # ------------------------------- SYSTEM -------------------------------
@@ -1052,10 +1279,18 @@ async def broadcaster():
                 S.ws_bytes += sent
                 S.ws_send_ms_max = max(S.ws_send_ms_max, slowest)
 
+PREVIEW_NODE: PreviewNode | None = None
+
 @app.on_event("startup")
 async def _startup():
+    global PREVIEW_NODE
+    try:
+        PROFILES.ensure_factories()        # slam/<algo>/usine.yaml, once (never rewritten)
+    except Exception as e:
+        print(f"[slam] factory snapshot failed: {e}", flush=True)
     rclpy.init()
-    node = PreviewNode()
+    d = PROFILES.defaults()
+    node = PREVIEW_NODE = PreviewNode(ALGO_BY_ID.get(d["algo"], ALGOS[0]))
     exe = MultiThreadedExecutor(); exe.add_node(node)
     threading.Thread(target=exe.spin, daemon=True).start()
     threading.Thread(target=H.run, daemon=True).start()

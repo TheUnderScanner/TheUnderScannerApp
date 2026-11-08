@@ -100,7 +100,7 @@ sudo systemctl restart underscanner      # recharger après une modif de app.py
 journalctl -u underscanner -f            # suivre les logs en direct
 python3 -m py_compile app.py             # vérifier la syntaxe AVANT de redémarrer
 cp app.py app.py.bak                     # filet de sécurité avant une grosse modif
-ls /data/underscanner/{bags,maps,configs,notes,trajectories}   # les artefacts des scans
+ls /data/underscanner/{bags,maps,configs,notes,trajectories,health,slam}   # artefacts des scans + profils SLAM
 ```
 
 Test rapide de l'API sans passer par le téléphone (depuis le PC connecté au point d'accès) :

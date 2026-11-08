@@ -1,0 +1,2 @@
+# Shell scripts are piped to bash on the Jetson: a CRLF checkout would break them.
+*.sh text eol=lf

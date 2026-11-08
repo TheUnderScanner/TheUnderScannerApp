@@ -495,7 +495,8 @@ class Effective:
 
 
 def build_effective(algo: SlamAlgo, factory_text: str, profile_text: str,
-                    overrides_text: str | None = None, header: list[str] | None = None) -> Effective:
+                    overrides_text: str | None = None,
+                    header: list[str] | Callable[[dict], list[str]] | None = None) -> Effective:
     """profile + overrides + imposed keys -> the config a scan runs. Raises ConfigError
     with every error from the profile and the overrides."""
     fact = load_factory(factory_text)
@@ -537,10 +538,12 @@ def build_effective(algo: SlamAlgo, factory_text: str, profile_text: str,
                                          "à compléter) : commentaires perdus dans la config du scan"))
     if not text.endswith("\n"):
         text += "\n"
-    if header:
-        text = "".join(f"# {h}\n" for h in header) + text
     root = algo.params_root
     applied = {".".join(p[len(root):]): v for p, v in ovr.items()}
+    if callable(header):
+        header = header(applied)        # lets the caller describe the applied overrides
+    if header:
+        text = "".join(f"# {h}\n" for h in header) + text
     return Effective(text, hashlib.sha256(text.encode("utf-8")).hexdigest(), applied,
                      warnings, preserved)
 
