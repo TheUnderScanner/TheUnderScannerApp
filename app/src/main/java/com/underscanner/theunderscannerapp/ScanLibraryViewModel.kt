@@ -85,7 +85,17 @@ class ScanLibraryViewModel(app: Application) : AndroidViewModel(app) {
     // Connection polling
     // -----------------------------------------------------------------------
 
+    private var pollers = 0
+
+    /**
+     * Start the `/status` poll loop. Reference-counted: both the Library and Settings show this
+     * VM's connection state, and when navigating between them both screens are briefly alive —
+     * the leaving screen's [stopStatusPolling] (fired after the transition) must not cancel the
+     * loop the entering screen just started. Without a poller, [connection] would freeze on its
+     * last value (e.g. "Connecting" forever when Settings is opened from the main menu).
+     */
     fun startStatusPolling() {
+        pollers++
         if (statusJob?.isActive == true) return
         statusJob = viewModelScope.launch {
             while (isActive) {
@@ -96,6 +106,8 @@ class ScanLibraryViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun stopStatusPolling() {
+        pollers = (pollers - 1).coerceAtLeast(0)
+        if (pollers > 0) return
         statusJob?.cancel()
         statusJob = null
     }
@@ -404,6 +416,8 @@ class ScanLibraryViewModel(app: Application) : AndroidViewModel(app) {
         loadedFromServerOnce = false
         _connection.value = ConnectionState.Connecting
         refresh()
+        // Probe the new address now rather than on the next 3 s tick.
+        viewModelScope.launch { pollStatusOnce() }
     }
 
     // -----------------------------------------------------------------------

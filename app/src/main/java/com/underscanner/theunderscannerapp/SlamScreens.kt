@@ -49,9 +49,15 @@ import kotlinx.coroutines.launch
 // ===========================================================================
 
 @Composable
-fun SlamSettingsSection(viewModel: SlamViewModel, onOpenProfiles: () -> Unit) {
+fun SlamSettingsSection(
+    viewModel: SlamViewModel,
+    connected: Boolean,
+    onOpenProfiles: () -> Unit
+) {
     val context = LocalContext.current
-    LaunchedEffect(Unit) { viewModel.refresh() }
+    // Load on entry, and again whenever the link comes (back) up: opened while still
+    // connecting, the first load fails and would otherwise stay "Indisponible".
+    LaunchedEffect(connected) { if (connected || viewModel.algos == null) viewModel.refresh() }
     val algos = viewModel.algos
     val toast: (String?) -> Unit = { err ->
         Toast.makeText(context, err ?: "Enregistré", Toast.LENGTH_SHORT).show()

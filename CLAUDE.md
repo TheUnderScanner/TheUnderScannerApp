@@ -292,7 +292,11 @@ drawn as a yellow polyline (`Trajectory.kt` + `MyGLRenderer.drawTrajectory`, `GL
   entirely, and `odom_ok`/`cloud_ok` dropouts render as shaded bands behind the rate lines. All
   axis text is composed with `Text`, never measured inside the Canvas.
 
-- **SettingsScreen.kt** — edit/normalize the Jetson base URL; shows live connection state; hosts
+- **SettingsScreen.kt** — edit/normalize the Jetson base URL; shows live connection state (it
+  starts the library VM's `/status` poll itself — that loop is **reference-counted** like the
+  Control Room's, since Library ↔ Settings are briefly both alive during a transition; before,
+  Settings only showed whatever the Library last polled, e.g. "Connexion…" forever when opened
+  from the main menu); hosts
   the **SLAM** section (`SlamSettingsSection`: default algo, default profile, → profile list).
   Scrollable.
 

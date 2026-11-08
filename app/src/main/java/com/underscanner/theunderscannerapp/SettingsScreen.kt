@@ -40,6 +40,12 @@ fun SettingsScreen(
     val connection by viewModel.connection
     var url by remember { mutableStateOf(viewModel.baseUrl) }
 
+    // The connection line below must be live, whichever screen Settings was opened from.
+    DisposableEffect(Unit) {
+        viewModel.startStatusPolling()
+        onDispose { viewModel.stopStatusPolling() }
+    }
+
     Scaffold(
         topBar = {
             TopAppBar(
@@ -107,7 +113,11 @@ fun SettingsScreen(
             HorizontalDivider()
 
             // --- SLAM: default algo / profile, profile editor -----------------------------------
-            SlamSettingsSection(viewModel = slamViewModel, onOpenProfiles = onOpenSlamProfiles)
+            SlamSettingsSection(
+                viewModel = slamViewModel,
+                connected = connection is ConnectionState.Connected,
+                onOpenProfiles = onOpenSlamProfiles
+            )
 
             HorizontalDivider()
 
