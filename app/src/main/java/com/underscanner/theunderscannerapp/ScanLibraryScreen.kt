@@ -455,6 +455,9 @@ private fun ConfigDialog(
         onDismissRequest = onDismiss,
         title = { Text("Config — ${scan.name}", maxLines = 1, overflow = TextOverflow.Ellipsis) },
         text = {
+            Column {
+            SlamProvenance(scan.slam)
+            Spacer(Modifier.height(8.dp))
             Box(Modifier.heightIn(max = 420.dp)) {
                 when {
                     error != null -> Text("Erreur : $error", color = MaterialTheme.colorScheme.error)
@@ -473,6 +476,7 @@ private fun ConfigDialog(
                     )
                 }
             }
+            }
         },
         confirmButton = {
             TextButton(
@@ -482,6 +486,45 @@ private fun ConfigDialog(
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Fermer") } }
     )
+}
+
+/**
+ * Which algo / profile / per-scan overrides produced this config. Scans from before SLAM
+ * profiles have no provenance: their config was copied from FAST-LIO's mid360.yaml when the
+ * scan stopped (on this Jetson that is the file that ran — the workspace is symlink-installed).
+ */
+@Composable
+private fun SlamProvenance(slam: SlamMeta?) {
+    Surface(
+        color = MaterialTheme.colorScheme.secondaryContainer,
+        shape = RoundedCornerShape(8.dp),
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Column(Modifier.padding(horizontal = 10.dp, vertical = 8.dp)) {
+            if (slam == null) {
+                Text(
+                    "Ancien format : config copiée depuis mid360.yaml à l'arrêt du scan " +
+                        "(pas d'algo / profil enregistré).",
+                    style = MaterialTheme.typography.bodySmall
+                )
+                return@Column
+            }
+            Text(slam.title, style = MaterialTheme.typography.titleSmall)
+            Text(
+                if (slam.overrides.isEmpty()) "Aucune modification pour ce scan"
+                else "Modifié pour ce scan : ${slam.overridesText}",
+                style = MaterialTheme.typography.bodySmall
+            )
+            slam.sha256?.let {
+                Text(
+                    "sha256 ${it.take(12)}…",
+                    style = MaterialTheme.typography.labelSmall,
+                    fontFamily = FontFamily.Monospace,
+                    color = MaterialTheme.colorScheme.onSecondaryContainer.copy(alpha = 0.7f)
+                )
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

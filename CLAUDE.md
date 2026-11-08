@@ -207,7 +207,19 @@ drawn as a yellow polyline (`Trajectory.kt` + `MyGLRenderer.drawTrajectory`, `GL
 - **MainMenuScreen.kt** — big-button menu: Scan Library and Lidar Control Room.
 
 - **ScanModels.kt** — `ScanInfo`, `ScanArtifact`, `StatusInfo` (incl. `clockOffsetS`), and the
-  `ConnectionState` sealed type (Connecting / Connected / Offline).
+  `ConnectionState` sealed type (Connecting / Connected / Offline). SLAM side: `SlamMeta` (a
+  scan's algo/profile/overrides/sha — on `ScanInfo.slam`, `ScanStatus.slam`, `StartResult.slam`;
+  null for pre-profile scans; overrides sorted by key since org.json key order differs between
+  Android and the JVM), `SlamAlgos`/`SlamAlgoInfo`, `SlamProfileInfo` (`FACTORY = "usine"`),
+  `SlamValidation`, `SlamIssue`, and `SlamConfigException` (a 422 with line-numbered issues).
+  Parsing is unit-tested in `SlamModelsTest` (the JVM tests use the real `org.json` as a
+  test-only dependency; Android's is a stub there).
+
+- **ScanApiClient.kt** SLAM calls — `getSlamAlgos`, `getSlamProfiles`, `get/put/delete/copy/
+  renameSlamProfile`, `setSlamDefaults`, `validateSlam`, and `startScan(location, algo, profile,
+  overrides)`. URLs are built with `HttpUrl.addPathSegment` (profile names may hold accents or
+  dots). `bodyOrThrow` maps errors: a 422 with `detail.issues` → `SlamConfigException`, otherwise
+  an `IOException` carrying the backend's `detail`.
 
 - **ClockSync.kt** — process-wide `object` that pushes the phone's time to `POST /clock` (see
   the clock note at the top).
@@ -239,7 +251,9 @@ drawn as a yellow polyline (`Trajectory.kt` + `MyGLRenderer.drawTrajectory`, `GL
   Config view, Notes edit). The top bar also has **search** (fuzzy: case-insensitive, separator-
   tolerant so `cave-x`/`cave_x`/`cave x` match; scans name/location/date/notes text) and a
   **sort** menu (date / name both directions, plus PCD size and bag size descending; persisted).
-  Both are client-side and work offline. Hosts the read-only **Config** dialog and the **Notes**
+  Both are client-side and work offline. Hosts the read-only **Config** dialog (headed by
+  `SlamProvenance`: algo · profile, the per-scan overrides and the config's sha256, or "ancien
+  format" for scans whose config was copied at stop) and the **Notes**
   form dialog (`site, issues, free`; full-width via `usePlatformDefaultWidth = false`, with a
   centred *Notes / date / scan-name* header, the name marquee-scrolling rather than truncating).
   A **pencil** (left of the health-chart icon; server scans only, enabled only while connected

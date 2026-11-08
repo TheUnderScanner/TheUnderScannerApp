@@ -50,6 +50,8 @@ data class ScanInfo(
     val health: ScanArtifact = ScanArtifact(present = false),
     /** Free-text notes content (backend sends `notes.text`); used for client-side search. */
     val notesText: String = "",
+    /** Which SLAM algo/profile/overrides produced the scan; null for pre-profile scans. */
+    val slam: SlamMeta? = null,
     val downloadedLocally: Boolean = false,
     /** Whether this scan's health log is on the phone — charts then work offline. */
     val healthLocal: Boolean = false,
@@ -66,10 +68,155 @@ data class ScanInfo(
             config = ScanArtifact.from(obj.optJSONObject("config")),
             notes = ScanArtifact.from(obj.optJSONObject("notes")),
             health = ScanArtifact.from(obj.optJSONObject("health")),
-            notesText = flattenJsonText(obj.optJSONObject("notes"))
+            notesText = flattenJsonText(obj.optJSONObject("notes")),
+            slam = SlamMeta.from(obj.optJSONObject("slam"))
         )
     }
 }
+
+/**
+ * Provenance of a scan's config (`configs/<scan>.json` on the Jetson): the algo and profile it
+ * ran with, the per-scan overrides, and the sha256 of the exact config file that ran.
+ * [overrides] is sorted by key (JSON object order isn't guaranteed across org.json
+ * implementations); values are shown as the backend sent them.
+ */
+data class SlamMeta(
+    val algo: String,
+    val algoLabel: String?,
+    val profile: String,
+    val overrides: List<Pair<String, String>>,
+    val sha256: String?
+) {
+    /** "FAST-LIO2 · voxel-0.3" */
+    val title: String get() = "${algoLabel ?: algo} · $profile"
+
+    /** "mapping.det_range=60.0, preprocess.blind=0.3", or "" when none. */
+    val overridesText: String get() = overrides.joinToString(", ") { "${it.first}=${it.second}" }
+
+    companion object {
+        fun from(obj: JSONObject?): SlamMeta? {
+            if (obj == null) return null
+            val algo = obj.optString("algo", "").ifBlank { return null }
+            val ovr = obj.optJSONObject("overrides")
+            val pairs = mutableListOf<Pair<String, String>>()
+            ovr?.keys()?.forEach { k -> pairs += k to ovr.opt(k).toString() }
+            return SlamMeta(
+                algo = algo,
+                algoLabel = obj.optString("algo_label", "").ifBlank { null },
+                profile = obj.optString("profile", ""),
+                overrides = pairs.sortedBy { it.first },
+                sha256 = obj.optString("sha256", "").ifBlank { null }
+            )
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// SLAM algos + config profiles (`/slam/...`). Profiles live on the Jetson; the phone
+// only reads/edits them through the API, which validates every write.
+// ---------------------------------------------------------------------------
+
+/** One validation finding. [line] is 1-based in the text [where] refers to. */
+data class SlamIssue(
+    val level: String,          // "error" | "warning"
+    val msg: String,
+    val line: Int?,
+    val where: String           // "yaml" (profile text) | "overrides"
+) {
+    val isError: Boolean get() = level == "error"
+
+    companion object {
+        fun from(obj: JSONObject) = SlamIssue(
+            level = obj.optString("level", "error"),
+            msg = obj.optString("msg", ""),
+            line = obj.optIntOrNull("line"),
+            where = obj.optString("where", "yaml")
+        )
+
+        fun list(arr: JSONArray?): List<SlamIssue> =
+            if (arr == null) emptyList()
+            else (0 until arr.length()).mapNotNull { arr.optJSONObject(it)?.let(::from) }
+    }
+}
+
+/** A 422 from a `/slam` write or `/scan/start`: the config was refused, see [issues]. */
+class SlamConfigException(val issues: List<SlamIssue>, message: String) : Exception(message)
+
+data class SlamAlgoInfo(
+    val id: String,
+    val label: String,
+    val description: String,
+    val defaultProfile: String,
+    /** Keys the backend imposes whatever the profile says (shown read-only in the editor). */
+    val forced: List<String>
+) {
+    companion object {
+        fun from(obj: JSONObject) = SlamAlgoInfo(
+            id = obj.optString("id"),
+            label = obj.optString("label", obj.optString("id")),
+            description = obj.optString("description", ""),
+            defaultProfile = obj.optString("default_profile", "usine"),
+            forced = obj.optJSONObject("forced")?.keys()?.asSequence()?.sorted()?.toList().orEmpty()
+        )
+    }
+}
+
+data class SlamAlgos(val default: String, val algos: List<SlamAlgoInfo>) {
+    fun byId(id: String?): SlamAlgoInfo? = algos.firstOrNull { it.id == id }
+
+    companion object {
+        fun from(obj: JSONObject): SlamAlgos {
+            val arr = obj.optJSONArray("algos")
+            val algos = if (arr == null) emptyList()
+                else (0 until arr.length()).mapNotNull { arr.optJSONObject(it)?.let(SlamAlgoInfo::from) }
+            return SlamAlgos(obj.optString("default", algos.firstOrNull()?.id ?: ""), algos)
+        }
+    }
+}
+
+data class SlamProfileInfo(
+    val name: String,
+    val readonly: Boolean,
+    val isDefault: Boolean,
+    val updated: String?
+) {
+    companion object {
+        /** Name of the factory profile: read-only, can only be duplicated. */
+        const val FACTORY = "usine"
+
+        fun from(obj: JSONObject) = SlamProfileInfo(
+            name = obj.optString("name"),
+            readonly = obj.optBoolean("readonly", false),
+            isDefault = obj.optBoolean("is_default", false),
+            updated = obj.optString("updated", "").ifBlank { null }
+        )
+    }
+}
+
+/** Result of `POST /slam/{algo}/validate` (a dry run). */
+data class SlamValidation(
+    val ok: Boolean,
+    val issues: List<SlamIssue>,
+    /** The profile text with type conversions written in (what Save would store). */
+    val normalized: String?,
+    /** The config a scan would run with (profile + overrides + imposed keys). */
+    val effective: String?
+) {
+    val errors: List<SlamIssue> get() = issues.filter { it.isError }
+    val warnings: List<SlamIssue> get() = issues.filterNot { it.isError }
+
+    companion object {
+        fun from(obj: JSONObject) = SlamValidation(
+            ok = obj.optBoolean("ok", false),
+            issues = SlamIssue.list(obj.optJSONArray("issues")),
+            normalized = obj.optString("normalized", "").ifEmpty { null },
+            effective = obj.optString("effective", "").ifEmpty { null }
+        )
+    }
+}
+
+/** Result of saving a profile: the stored (normalized) text + warnings. */
+data class SlamSaveResult(val text: String, val issues: List<SlamIssue>)
 
 /**
  * Collect every textual value inside a JSON object for client-side search — whether note
@@ -141,7 +288,9 @@ data class ScanStatus(
     val startedAt: String?,
     val elapsedS: Long,
     val odomOk: Boolean,
-    val cloudOk: Boolean
+    val cloudOk: Boolean,
+    /** Algo/profile/overrides of the running scan (null when idle or on an older backend). */
+    val slam: SlamMeta? = null
 ) {
     companion object {
         fun from(obj: JSONObject): ScanStatus = ScanStatus(
@@ -150,7 +299,8 @@ data class ScanStatus(
             startedAt = obj.optString("started_at", "").ifBlank { null },
             elapsedS = obj.optLong("elapsed_s", 0L),
             odomOk = obj.optBoolean("odom_ok", false),
-            cloudOk = obj.optBoolean("cloud_ok", false)
+            cloudOk = obj.optBoolean("cloud_ok", false),
+            slam = SlamMeta.from(obj.optJSONObject("slam"))
         )
     }
 }
@@ -159,13 +309,15 @@ data class ScanStatus(
 data class StartResult(
     val scan: String,
     val running: Boolean,
-    val startedAt: String?
+    val startedAt: String?,
+    val slam: SlamMeta? = null
 ) {
     companion object {
         fun from(obj: JSONObject): StartResult = StartResult(
             scan = obj.optString("scan", ""),
             running = obj.optBoolean("running", true),
-            startedAt = obj.optString("started_at", "").ifBlank { null }
+            startedAt = obj.optString("started_at", "").ifBlank { null },
+            slam = SlamMeta.from(obj.optJSONObject("slam"))
         )
     }
 }

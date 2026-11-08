@@ -4,10 +4,14 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
+import okhttp3.HttpUrl
+import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.RequestBody
 import okhttp3.RequestBody.Companion.toRequestBody
+import okhttp3.Response
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
 import org.json.JSONArray
@@ -229,8 +233,17 @@ class ScanApiClient(initialBaseUrl: String) {
     // Phase 2 — scan control
     // -----------------------------------------------------------------------
 
-    /** POST /scan/start — begin a scan. Fails with [ScanAlreadyRunningException] on 409. */
-    suspend fun startScan(location: String?): Result<StartResult> = withContext(Dispatchers.IO) {
+    /**
+     * POST /scan/start — begin a scan. [algo]/[profile] null = the Jetson's defaults;
+     * [overrides] = per-scan "key: value" lines. Fails with [ScanAlreadyRunningException] on
+     * 409 and [SlamConfigException] on 422 (profile/overrides refused, nothing launched).
+     */
+    suspend fun startScan(
+        location: String?,
+        algo: String? = null,
+        profile: String? = null,
+        overrides: String? = null
+    ): Result<StartResult> = withContext(Dispatchers.IO) {
         runCatching {
             val payload = JSONObject().apply {
                 if (!location.isNullOrBlank()) put("location", location.trim())
@@ -238,20 +251,111 @@ class ScanApiClient(initialBaseUrl: String) {
                 // it names the scan with the phone's local date and corrects its timestamps.
                 put("client_time_ms", System.currentTimeMillis())
                 put("client_date", java.time.LocalDate.now().toString())
+                if (!algo.isNullOrBlank()) put("algo", algo)
+                if (!profile.isNullOrBlank()) put("profile", profile)
+                if (!overrides.isNullOrBlank()) put("overrides", overrides)
             }
-            val body = payload.toString().toRequestBody("application/json".toMediaType())
+            val body = payload.toString().toRequestBody(JSON)
             client.newCall(Request.Builder().url("$baseUrl/scan/start").post(body).build())
                 .execute().use { response ->
                     if (response.code == 409) throw ScanAlreadyRunningException()
-                    val text = response.body?.string().orEmpty()
-                    if (!response.isSuccessful) {
-                        // Surface the backend's reason (e.g. "« slam » s'est arrêté au démarrage").
-                        val detail = runCatching { JSONObject(text).optString("detail") }.getOrNull()
-                        throw IOException(detail?.ifBlank { null } ?: "HTTP ${response.code}")
-                    }
-                    StartResult.from(JSONObject(text.ifEmpty { "{}" }))
+                    // Surfaces the backend's reason (e.g. "« slam » s'est arrêté au démarrage").
+                    StartResult.from(JSONObject(bodyOrThrow(response).ifEmpty { "{}" }))
                 }
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // SLAM algos + config profiles (/slam/...)
+    // -----------------------------------------------------------------------
+
+    /** `<base>/slam/<segments…>`, each segment URL-encoded (profile names may hold accents). */
+    private fun slamUrl(vararg segments: String): HttpUrl =
+        "$baseUrl/".toHttpUrl().newBuilder().addPathSegment("slam")
+            .apply { segments.forEach { addPathSegment(it) } }
+            .build()
+
+    private suspend fun <T> slamCall(
+        url: HttpUrl,
+        method: String = "GET",
+        body: RequestBody? = null,
+        parse: (String) -> T
+    ): Result<T> = withContext(Dispatchers.IO) {
+        runCatching {
+            client.newCall(Request.Builder().url(url).method(method, body).build())
+                .execute().use { response -> parse(bodyOrThrow(response)) }
+        }
+    }
+
+    suspend fun getSlamAlgos(): Result<SlamAlgos> =
+        slamCall(slamUrl("algos")) { SlamAlgos.from(JSONObject(it)) }
+
+    suspend fun getSlamProfiles(algo: String): Result<List<SlamProfileInfo>> =
+        slamCall(slamUrl(algo, "profiles")) { text ->
+            val arr = JSONObject(text).optJSONArray("profiles") ?: JSONArray()
+            (0 until arr.length()).mapNotNull { arr.optJSONObject(it)?.let(SlamProfileInfo::from) }
+        }
+
+    suspend fun getSlamProfile(algo: String, name: String): Result<String> =
+        slamCall(slamUrl(algo, "profiles", name)) { it }
+
+    /** Validate + store (creates it if new). [SlamConfigException] when refused. */
+    suspend fun putSlamProfile(algo: String, name: String, yaml: String): Result<SlamSaveResult> =
+        slamCall(slamUrl(algo, "profiles", name), "PUT",
+            yaml.toRequestBody("text/plain; charset=utf-8".toMediaType())) { text ->
+            val o = JSONObject(text)
+            SlamSaveResult(o.optString("text", yaml), SlamIssue.list(o.optJSONArray("issues")))
+        }
+
+    suspend fun deleteSlamProfile(algo: String, name: String): Result<Unit> =
+        slamCall(slamUrl(algo, "profiles", name), "DELETE") { }
+
+    suspend fun copySlamProfile(algo: String, name: String, to: String): Result<Unit> =
+        slamCall(slamUrl(algo, "profiles", name, "copy"), "POST",
+            JSONObject().put("to", to).toString().toRequestBody(JSON)) { }
+
+    suspend fun renameSlamProfile(algo: String, name: String, to: String): Result<Unit> =
+        slamCall(slamUrl(algo, "profiles", name, "rename"), "POST",
+            JSONObject().put("to", to).toString().toRequestBody(JSON)) { }
+
+    /** Set the default algo and/or that algo's default profile. */
+    suspend fun setSlamDefaults(algo: String?, profile: String?): Result<Unit> =
+        slamCall(slamUrl("defaults"), "PUT", JSONObject().apply {
+            if (algo != null) put("algo", algo)
+            if (profile != null) put("profile", profile)
+        }.toString().toRequestBody(JSON)) { }
+
+    /**
+     * Dry-run validation: [yaml] (editor text) or else the stored [profile] (null = default),
+     * plus optional per-scan [overrides]. A refused config is a normal result (ok = false).
+     */
+    suspend fun validateSlam(
+        algo: String,
+        yaml: String? = null,
+        profile: String? = null,
+        overrides: String? = null
+    ): Result<SlamValidation> =
+        slamCall(slamUrl(algo, "validate"), "POST", JSONObject().apply {
+            if (yaml != null) put("yaml", yaml)
+            if (profile != null) put("profile", profile)
+            if (!overrides.isNullOrBlank()) put("overrides", overrides)
+        }.toString().toRequestBody(JSON)) { SlamValidation.from(JSONObject(it)) }
+
+    /**
+     * The response body, or a typed failure: a 422 whose `detail` carries `issues` becomes a
+     * [SlamConfigException]; anything else an IOException with the backend's `detail` text.
+     */
+    private fun bodyOrThrow(response: Response): String {
+        val text = response.body?.string().orEmpty()
+        if (response.isSuccessful) return text
+        val detail = runCatching { JSONObject(text).opt("detail") }.getOrNull()
+        if (detail is JSONObject) {
+            val msg = detail.optString("msg", "").ifBlank { "HTTP ${response.code}" }
+            val issues = SlamIssue.list(detail.optJSONArray("issues"))
+            if (issues.isNotEmpty()) throw SlamConfigException(issues, msg)
+            throw IOException(msg)
+        }
+        throw IOException((detail as? String)?.ifBlank { null } ?: "HTTP ${response.code}")
     }
 
     /** POST /scan/stop — stop + save. Fails with [NoScanRunningException] on 409. */
@@ -321,6 +425,10 @@ class ScanApiClient(initialBaseUrl: String) {
             .replaceFirst("http://", "ws://") + "/ws/preview"
         val request = Request.Builder().url(wsUrl).build()
         return wsClient.newWebSocket(request, listener)
+    }
+
+    private companion object {
+        val JSON = "application/json".toMediaType()
     }
 
     /** Separate client for the streaming socket: no read timeout, OkHttp pings to keep alive. */
