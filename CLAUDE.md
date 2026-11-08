@@ -288,7 +288,27 @@ drawn as a yellow polyline (`Trajectory.kt` + `MyGLRenderer.drawTrajectory`, `GL
   entirely, and `odom_ok`/`cloud_ok` dropouts render as shaded bands behind the rate lines. All
   axis text is composed with `Text`, never measured inside the Canvas.
 
-- **SettingsScreen.kt** — edit/normalize the Jetson base URL; shows live connection state.
+- **SettingsScreen.kt** — edit/normalize the Jetson base URL; shows live connection state; hosts
+  the **SLAM** section (`SlamSettingsSection`: default algo, default profile, → profile list).
+  Scrollable.
+
+- **SlamViewModel.kt** — third NavHost-hoisted VM (Settings, profile screens, and the Control
+  Room scan form): algos, the selected algo's profiles, list actions (default / copy / rename /
+  delete, each reporting a message), editor calls (load / validate / save) and
+  `validateForScan`. Keeps no copy of the profiles: everything goes through `/slam`, so it needs
+  the Jetson. `nameProblem()` = a light client check of profile names (backend is authoritative).
+
+- **SlamScreens.kt** — `SlamProfilesScreen` (route `slamProfiles`: one card per profile, `usine`
+  locked, default badge, per-row menu, FAB = new profile as a copy of `usine`) and
+  `SlamProfileEditorScreen` (route `slamEditor/{algo}/{name}`, args `Uri.encode`d).
+  The editor is text-only by design (≈40 nested keys, different per algo): `CodeEditor` =
+  `BasicTextField`, monospace, line-number gutter sharing one vertical scroll and one line
+  height with the text, no soft wrap (horizontal scroll), validation issues painted as
+  whole-line backgrounds (`LineMarks` VisualTransformation) and listed below (tap = jump to the
+  line). **Guard:** *Enregistrer* is enabled only when the current text is exactly the one the
+  server last validated OK (`validatedText == text`); any keystroke invalidates it, and the PUT
+  re-validates anyway. `usine` is read-only (duplicate it). *Réinitialiser depuis l'usine* only
+  replaces the editor buffer. Back with unsaved changes asks first.
 
 - **PCDViewerScreen.kt** — the 3D viewer wrapper: **no top bar** (the GL surface is
   full-screen; Android's back gesture handles leaving), just the **viewer options cluster**

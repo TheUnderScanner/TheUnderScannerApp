@@ -11,6 +11,8 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.background
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material3.*
@@ -30,7 +32,9 @@ import androidx.compose.foundation.text.KeyboardOptions
 @Composable
 fun SettingsScreen(
     viewModel: ScanLibraryViewModel,
-    onBack: () -> Unit
+    slamViewModel: SlamViewModel,
+    onBack: () -> Unit,
+    onOpenSlamProfiles: () -> Unit
 ) {
     val context = LocalContext.current
     val connection by viewModel.connection
@@ -52,6 +56,7 @@ fun SettingsScreen(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(padding)
+                .verticalScroll(rememberScrollState())
                 .padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
@@ -98,6 +103,11 @@ fun SettingsScreen(
                 Spacer(Modifier.width(8.dp))
                 Text(label, style = MaterialTheme.typography.bodyMedium)
             }
+
+            HorizontalDivider()
+
+            // --- SLAM: default algo / profile, profile editor -----------------------------------
+            SlamSettingsSection(viewModel = slamViewModel, onOpenProfiles = onOpenSlamProfiles)
 
             HorizontalDivider()
 

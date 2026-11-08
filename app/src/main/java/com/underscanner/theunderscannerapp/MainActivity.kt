@@ -95,6 +95,7 @@ fun AppNavHost() {
     val navController = rememberNavController()
     val libraryViewModel: ScanLibraryViewModel = viewModel()
     val controlViewModel: ScanControlViewModel = viewModel()
+    val slamViewModel: SlamViewModel = viewModel()
 
     NavHost(navController = navController, startDestination = "mainMenu") {
         composable("mainMenu") {
@@ -130,7 +131,37 @@ fun AppNavHost() {
         }
 
         composable("settings") {
-            SettingsScreen(viewModel = libraryViewModel, onBack = { navController.popBackStack() })
+            SettingsScreen(
+                viewModel = libraryViewModel,
+                slamViewModel = slamViewModel,
+                onBack = { navController.popBackStack() },
+                onOpenSlamProfiles = { navController.navigate("slamProfiles") }
+            )
+        }
+
+        composable("slamProfiles") {
+            SlamProfilesScreen(
+                viewModel = slamViewModel,
+                onBack = { navController.popBackStack() },
+                onOpenProfile = { algo, name ->
+                    navController.navigate("slamEditor/${Uri.encode(algo)}/${Uri.encode(name)}")
+                }
+            )
+        }
+
+        composable(
+            route = "slamEditor/{algo}/{name}",
+            arguments = listOf(
+                navArgument("algo") { type = NavType.StringType },
+                navArgument("name") { type = NavType.StringType }
+            )
+        ) { backStackEntry ->
+            SlamProfileEditorScreen(
+                viewModel = slamViewModel,
+                algo = backStackEntry.arguments?.getString("algo").orEmpty(),
+                name = backStackEntry.arguments?.getString("name").orEmpty(),
+                onBack = { navController.popBackStack() }
+            )
         }
 
         composable(

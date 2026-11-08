@@ -59,6 +59,24 @@ class SlamModelsTest {
         assertNull(v.effective)
     }
 
+    @Test fun editorLineStart() {
+        val t = "a: 1\nbb: 2\n\nc: 3"
+        assertEquals(0, lineStart(t, 1))
+        assertEquals(5, lineStart(t, 2))
+        assertEquals(11, lineStart(t, 3))
+        assertEquals(12, lineStart(t, 4))
+        assertEquals(t.length, lineStart(t, 99))
+    }
+
+    @Test fun profileNameCheck() {
+        assertNull(SlamViewModel.nameProblem("voxel-0.3"))
+        assertNull(SlamViewModel.nameProblem("Résidence_2"))
+        assertTrue(SlamViewModel.nameProblem(".x") != null)
+        assertTrue(SlamViewModel.nameProblem("a/b") != null)
+        assertTrue(SlamViewModel.nameProblem("usine") != null)
+        assertTrue(SlamViewModel.nameProblem("x".repeat(65)) != null)
+    }
+
     @Test fun algosAndProfiles() {
         val a = SlamAlgos.from(JSONObject("""
             {"default":"fastlio2","algos":[{"id":"fastlio2","label":"FAST-LIO2","description":"d",
