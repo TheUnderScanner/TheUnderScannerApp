@@ -64,7 +64,7 @@ fun PCDViewerScreen(
     var showScale by remember { mutableStateOf(false) }
 
     LaunchedEffect(Unit) {
-        delay(3000)
+        delay(5000)
         showPointCount = false
     }
 
@@ -116,7 +116,7 @@ fun PCDViewerScreen(
                 shape = RoundedCornerShape(8.dp)
             ) {
                 Text(
-                    "$pointCount points",
+                    "${groupDigits(pointCount)} points",
                     modifier = Modifier.padding(8.dp),
                     style = MaterialTheme.typography.labelMedium
                 )
@@ -247,3 +247,10 @@ private fun formatScale(step: Float): String {
     val label = if (step >= 1000f) "${(step / 1000f).toInt()} km" else "${step.toInt()} m"
     return "Échelle : $label"
 }
+
+/**
+ * Digits in groups of three, French style: 1234567 → "1 234 567". The separator is a narrow
+ * no-break space (U+202F) so the label never wraps mid-number.
+ */
+internal fun groupDigits(n: Int): String =
+    n.toString().reversed().chunked(3).joinToString(" ").reversed()
