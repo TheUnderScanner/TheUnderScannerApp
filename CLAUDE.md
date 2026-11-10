@@ -276,7 +276,10 @@ drawn as a yellow polyline (`Trajectory.kt` + `MyGLRenderer.drawTrajectory`, `GL
   (SharedPreferences `underscanner_settings`).
 
 - **ScanLibraryScreen.kt** — the single Scan Library screen: connection indicator + address
-  (→ Settings), pull-to-refresh, one row per scan (bag size, PCD Download/Open + progress,
+  (→ Settings), pull-to-refresh (its indicator shows **only for a user pull**; automatic
+  refreshes are silent, and the screen forces `animateToHidden()` once nothing refreshes —
+  material3 1.3.0's indicator could stay parked, spinning, after rapid `isRefreshing` flips until
+  the next touch), one row per scan (bag size, PCD Download/Open + progress,
   Config view, Notes edit). The top bar also has **search** (fuzzy: case-insensitive, separator-
   tolerant so `cave-x`/`cave_x`/`cave x` match; scans name/location/date/notes text) and a
   **sort** menu (date / name both directions, plus PCD size and bag size descending; persisted).

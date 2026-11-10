@@ -16,6 +16,7 @@ import androidx.compose.material.icons.automirrored.filled.NoteAdd
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
+import androidx.compose.material3.pulltorefresh.rememberPullToRefreshState
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
@@ -180,9 +181,26 @@ fun ScanLibraryScreen(
             )
         }
     ) { padding ->
+        // The pull indicator shows only for a refresh the user pulled for. Automatic refreshes
+        // (screen entry, end of a USB copy, stick change, rename) stay silent: in material3
+        // 1.3.0 the indicator launches one un-cancelled animation per isRefreshing change, and
+        // rapid true->false flips could leave it parked on screen, spinning until the next
+        // touch. Belt and braces: once nothing is refreshing, force it hidden.
+        var userPulled by remember { mutableStateOf(false) }
+        val pullState = rememberPullToRefreshState()
+        LaunchedEffect(isRefreshing) {
+            if (!isRefreshing) {
+                userPulled = false
+                pullState.animateToHidden()
+            }
+        }
         PullToRefreshBox(
-            isRefreshing = isRefreshing,
-            onRefresh = { viewModel.refresh() },
+            isRefreshing = userPulled && isRefreshing,
+            onRefresh = {
+                userPulled = true
+                viewModel.refresh()
+            },
+            state = pullState,
             modifier = Modifier
                 .fillMaxSize()
                 .padding(padding)
